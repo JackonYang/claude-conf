@@ -103,7 +103,7 @@ DENY_REASON="BLOCKED: Direct branch switching is not allowed in the main repo.
   Use a worktree instead (all worktrees go under ~/.worktrees/<repo>/):
     - Agent tool with isolation: \"worktree\"
     - Agent teams: each team member must use isolation: \"worktree\"
-    - Manual: git worktree add ~/.worktrees/$(basename \$(git rev-parse --show-toplevel))/<slug> $TARGET
+    - Manual: git worktree add ~/.worktrees/$(basename $(git rev-parse --show-toplevel))/<slug> $TARGET
 
   Why: Switching branches in the main repo disrupts the user's working
   context, invalidates file caches, and causes stale-state errors."

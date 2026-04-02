@@ -25,5 +25,5 @@
 ## 自动化运行边界
 
 - 每个 issue/任务在独立 branch 工作，禁止跨任务共用 branch。
-- 连续 3 次 CI 失败或同一错误重复出现：停止重试，写 worklog 记录卡点，通知 Jack。
+- 连续 3 次 CI 失败或同一错误重复出现：停止重试，写 worklog 记录卡点。
 - 自动化可以跑到 PR ready，merge 到 main 必须人工确认。
