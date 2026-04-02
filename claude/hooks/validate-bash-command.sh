@@ -15,8 +15,14 @@ fi
 blocked_regex='(^|[[:space:];|&(])((sudo[[:space:]]+)?rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))|(mkfs|fdisk|diskutil[[:space:]]+eraseDisk)[[:space:]]|dd[[:space:]]+if='
 
 if printf '%s' "$command_text" | grep -Eiq "$blocked_regex"; then
-  echo "Blocked dangerous command: $command_text" >&2
-  exit 2
+  jq -n --arg reason "Blocked risky bash command in bypass mode: $command_text" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: $reason
+    }
+  }'
+  exit 0
 fi
 
 exit 0
