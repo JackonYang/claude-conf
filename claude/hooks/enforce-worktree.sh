@@ -3,6 +3,11 @@
 # Forces worktree usage when switching to a different existing branch.
 # Allows: branch creation (-b/-B/-c/-C), file restore (-- path),
 #          checkout . (discard), --track, current branch (no-op), worktrees.
+#
+# Worktree location: ~/.worktrees/<repo>/<slug>/
+# Why not ../repo-wt-name (sibling dir): pollutes projects/ with wt debris,
+# mixes with real repos, hard to bulk-clean. Centralized dir keeps project
+# dirs clean and gives one place to ls/prune all active worktrees.
 
 set -euo pipefail
 
@@ -95,9 +100,10 @@ DENY_REASON="BLOCKED: Direct branch switching is not allowed in the main repo.
   You are on: $CURRENT
   You tried:  git checkout $TARGET
 
-  Use a worktree instead:
+  Use a worktree instead (all worktrees go under ~/.worktrees/<repo>/):
     - Agent tool with isolation: \"worktree\"
-    - git worktree add ../<repo>-wt-<name> $TARGET
+    - Agent teams: each team member must use isolation: \"worktree\"
+    - Manual: git worktree add ~/.worktrees/$(basename \$(git rev-parse --show-toplevel))/<slug> $TARGET
 
   Why: Switching branches in the main repo disrupts the user's working
   context, invalidates file caches, and causes stale-state errors."
