@@ -64,9 +64,10 @@ echo "claude-conf setup $(date +%Y-%m-%d)"
 $DRY_RUN && echo "(dry run mode)"
 echo ""
 
-link "claude/CLAUDE.md"       "CLAUDE.md"
-link "claude/settings.json"   "settings.json"
-link "claude/hooks"           "hooks"
+link "claude/CLAUDE.md"              "CLAUDE.md"
+link "claude/settings.json"          "settings.json"
+link "claude/statusline-command.sh"  "statusline-command.sh"
+link "claude/hooks"                  "hooks"
 
 echo ""
 echo "done."
