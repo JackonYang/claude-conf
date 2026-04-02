@@ -6,6 +6,8 @@
 
 set -euo pipefail
 
+command -v jq >/dev/null 2>&1 || { echo "FATAL: jq is required to run these tests"; exit 1; }
+
 HOOK="$(cd "$(dirname "$0")/.." && pwd)/claude/hooks/validate-bash-command.sh"
 PASS=0
 FAIL=0
@@ -76,6 +78,10 @@ assert_allowed "curl with dangerous body"      "curl -X POST -d 'run mkfs /dev/s
 echo ""
 echo "=== Edge cases ==="
 assert_allowed "empty input"           ""
+assert_allowed "rm -rf /tmp"           "rm -rf /tmp"
+assert_blocked "unclosed quote"        'rm -rf / "'
+assert_blocked "multiline dangerous"   "$(printf 'echo hello\nrm -rf /')"
+assert_blocked "mixed: rm + quoted"    "rm -rf / 'safe text'"
 
 echo ""
 echo "---"
