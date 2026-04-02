@@ -19,7 +19,14 @@
       "TodoWrite(*)",
       "mcp__*"
     ],
-    "defaultMode": "bypassPermissions"
+    "defaultMode": "bypassPermissions",
+    "additionalDirectories": [
+      "/Users/jackon/",
+      "/home/jackon/",
+      "/home/jiekun.yang/",
+      "/data1/jiekun.yang/",
+      "/root/"
+    ]
   },
   "hooks": {
     "SessionStart": [
@@ -68,6 +75,13 @@
         ]
       }
     ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash $HOME/.claude/statusline-command.sh"
+  },
+  "enabledPlugins": {
+    "discord@claude-plugins-official": true
   },
   "effortLevel": "medium",
   "skipDangerousModePermissionPrompt": true
