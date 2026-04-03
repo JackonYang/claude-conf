@@ -68,6 +68,7 @@ link "claude/CLAUDE.md"              "CLAUDE.md"
 link "claude/settings.json"          "settings.json"
 link "claude/statusline-command.sh"  "statusline-command.sh"
 link "claude/hooks"                  "hooks"
+link "claude/skills"                 "skills"
 
 echo ""
 echo "done."
