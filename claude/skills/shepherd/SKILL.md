@@ -36,45 +36,48 @@ REMOTE_URL=$(git remote get-url origin)
 ```
 
 Detect platform from remote URL:
-- `github.com` → GitHub, use `gh`
-- anything else → GitLab, use `glab api`
+- `github.com` in URL → GitHub, use `gh`
+- `gitlab` in URL or hostname matches known GitLab instance → GitLab, use `glab api`
+- ambiguous → check which CLI is authenticated (`gh auth status` / `glab auth status`)
 
 #### GitLab
 
 ```bash
-PROJECT_PATH=$(echo "$REMOTE_URL" | sed -E 's|.*[:/](.*)\.git$|\1|')
+# Strip optional .git suffix, extract project path from SSH or HTTPS remote
+PROJECT_PATH=$(echo "$REMOTE_URL" | sed -E 's|\.git$||' | sed -E 's|.*[:/](.*)|\1|')
 PROJECT_ENC=$(echo "$PROJECT_PATH" | sed 's|/|%2F|g')
-# Find MR
-glab api "projects/$PROJECT_ENC/merge_requests?source_branch=$BRANCH&state=opened&per_page=1"
+
+# Find MR and extract iid
+MR_IID=$(glab api "projects/$PROJECT_ENC/merge_requests?source_branch=$BRANCH&state=opened&per_page=1" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['iid'] if d else '')")
 ```
 
 #### GitHub
 
 ```bash
-REPO=$(echo "$REMOTE_URL" | sed -E 's|.*[:/](.*)\.git$|\1|')
-# Find PR
-gh pr view "$BRANCH" --json number,url
+# Strip optional .git suffix, extract owner/repo
+REPO=$(echo "$REMOTE_URL" | sed -E 's|\.git$||' | sed -E 's|.*[:/](.*)|\1|')
+
+# Find PR and extract number
+PR_NUMBER=$(gh pr view "$BRANCH" --json number --jq '.number')
 ```
 
-No MR/PR → stop.
+No MR/PR (empty MR_IID or PR_NUMBER) → stop.
 
 ### Step 1. Get latest pipeline/check status
 
 #### GitLab
 ```bash
-glab api "projects/$PROJECT_ENC/merge_requests/$MR_IID/pipelines?per_page=1"
+PIPELINE_ID=$(glab api "projects/$PROJECT_ENC/merge_requests/$MR_IID/pipelines?per_page=1" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'] if d else '')")
 ```
 
 #### GitHub
 ```bash
-# Get check suite for HEAD commit
-SHA=$(git rev-parse HEAD)
-gh api "repos/$REPO/commits/$SHA/check-runs" --jq '.check_runs[] | {id,name,status,conclusion}'
-# Or get workflow runs
-gh run list --branch "$BRANCH" --limit 1 --json databaseId,status,conclusion
+RUN_ID=$(gh run list --branch "$BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId')
 ```
 
-No pipeline/checks → push to trigger, wait 15s, retry.
+No pipeline/checks (empty PIPELINE_ID or RUN_ID) → push to trigger, wait 15s, retry.
 
 ### Step 2. Poll until complete
 
