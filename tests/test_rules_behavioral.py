@@ -2,34 +2,30 @@
 Behavioral comparison test for CLAUDE.md rule changes.
 
 Validates that stripped rules produce equivalent behavioral compliance
-compared to the verbose version. Uses Claude API to run identical prompts
-with before/after CLAUDE.md as system context.
+compared to the verbose version. Uses `claude -p` to run probes with
+before/after CLAUDE.md as system prompt, then LLM-as-judge to evaluate.
+
+Runs in /tmp to avoid loading local CLAUDE.md into the comparison.
 
 Exit code: non-zero if any after-rule probe regresses vs before-rule probe.
 
 Usage:
     python tests/test_rules_behavioral.py
-
-Requires: ANTHROPIC_API_KEY environment variable
 """
 
 import json
-import os
-import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-import anthropic
+JUDGE_SYSTEM = (
+    "You are an eval judge. Given a behavioral rule, a user prompt, and a model response, "
+    "decide whether the response complies with the rule.\n\n"
+    "Reply with exactly one word: PASS or FAIL.\n"
+    "No explanation."
+)
 
-MODEL = "claude-sonnet-4-20250514"
-
-JUDGE_SYSTEM = """You are an eval judge. Given a behavioral rule, a user prompt, and a model response,
-decide whether the response complies with the rule.
-
-Reply with exactly one word: PASS or FAIL.
-No explanation."""
-
-# Probes: each targets a specific rule and has a judge criterion
 PROBES = [
     {
         "id": "rule1_verify_before_assert",
@@ -90,51 +86,64 @@ PROBES = [
 ]
 
 
-def judge_response(client, probe: dict, response_text: str) -> bool:
-    """Use LLM-as-judge to evaluate whether a response complies with the rule."""
-    judge_prompt = f"""Rule: {probe['rule']}
-Criterion: {probe['judge_criterion']}
-
-User prompt: {probe['prompt']}
-
-Model response:
-{response_text}
-
-Does the response comply with the rule? Reply PASS or FAIL."""
-
-    result = client.messages.create(
-        model=MODEL,
-        max_tokens=8,
-        system=JUDGE_SYSTEM,
-        messages=[{"role": "user", "content": judge_prompt}],
+def run_claude(prompt: str, system_prompt_file: str) -> str:
+    """Run claude -p with a system prompt file. Runs in /tmp to avoid local CLAUDE.md."""
+    result = subprocess.run(
+        [
+            "claude", "-p",
+            "--model", "sonnet",
+            "--system-prompt-file", system_prompt_file,
+            "--disallowed-tools", "Bash", "Read", "Write", "Edit", "Glob", "Grep",
+            "--no-session-persistence",
+        ],
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd="/tmp",
     )
-    verdict = result.content[0].text.strip().upper()
-    return verdict == "PASS"
+    if result.returncode != 0:
+        print(f"  claude -p failed: {result.stderr[:200]}", file=sys.stderr)
+        return ""
+    return result.stdout.strip()
 
 
-def run_probe(client, system_prompt: str, probe: dict) -> dict:
+def judge_response(probe: dict, response_text: str) -> bool:
+    """Use claude -p as LLM-as-judge to evaluate compliance."""
+    judge_prompt = (
+        f"Rule: {probe['rule']}\n"
+        f"Criterion: {probe['judge_criterion']}\n\n"
+        f"User prompt: {probe['prompt']}\n\n"
+        f"Model response:\n{response_text}\n\n"
+        f"Does the response comply with the rule? Reply PASS or FAIL."
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False
+    ) as f:
+        f.write(JUDGE_SYSTEM)
+        judge_file = f.name
+
+    try:
+        verdict = run_claude(judge_prompt, judge_file)
+    finally:
+        Path(judge_file).unlink(missing_ok=True)
+
+    return verdict.strip().upper().startswith("PASS")
+
+
+def run_probe(system_prompt_file: str, probe: dict) -> dict:
     """Run a single behavioral probe and return the result."""
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=512,
-        system=system_prompt,
-        messages=[{"role": "user", "content": probe["prompt"]}],
-    )
-    text = response.content[0].text
+    text = run_claude(probe["prompt"], system_prompt_file)
     return {
         "id": probe["id"],
         "rule": probe["rule"],
         "response": text,
-        "input_tokens": response.usage.input_tokens,
-        "output_tokens": response.usage.output_tokens,
     }
 
 
 def main():
-    client = anthropic.Anthropic()
-
-    before_path = Path(__file__).parent / "fixtures" / "claude-md-before.md"
-    after_path = Path(__file__).parent.parent / "claude" / "CLAUDE.md"
+    before_path = (Path(__file__).parent / "fixtures" / "claude-md-before.md").resolve()
+    after_path = (Path(__file__).parent.parent / "claude" / "CLAUDE.md").resolve()
 
     if not before_path.exists():
         print(f"ERROR: baseline fixture not found: {before_path}")
@@ -144,30 +153,23 @@ def main():
     after_md = after_path.read_text()
 
     print(f"Before: {len(before_md)} chars | After: {len(after_md)} chars | Delta: {len(after_md) - len(before_md):+d} chars")
-    print(f"Model: {MODEL}")
     print(f"Probes: {len(PROBES)}")
     print("=" * 72)
 
     results = {"before": [], "after": []}
     regressions = []
-    total_before_input = 0
-    total_after_input = 0
 
     for probe in PROBES:
         print(f"\n--- {probe['id']}: {probe['description']} ---")
 
-        result_before = run_probe(client, before_md, probe)
-        result_after = run_probe(client, after_md, probe)
+        result_before = run_probe(str(before_path), probe)
+        result_after = run_probe(str(after_path), probe)
 
         results["before"].append(result_before)
         results["after"].append(result_after)
 
-        total_before_input += result_before["input_tokens"]
-        total_after_input += result_after["input_tokens"]
-
-        # LLM-as-judge evaluation
-        before_pass = judge_response(client, probe, result_before["response"])
-        after_pass = judge_response(client, probe, result_after["response"])
+        before_pass = judge_response(probe, result_before["response"])
+        after_pass = judge_response(probe, result_after["response"])
 
         status_before = "PASS" if before_pass else "FAIL"
         status_after = "PASS" if after_pass else "FAIL"
@@ -180,21 +182,17 @@ def main():
         elif not before_pass and after_pass:
             print(f"  ++ IMPROVEMENT: before failed but after passed")
 
-        print(f"  Before tokens: {result_before['input_tokens']} | After tokens: {result_after['input_tokens']}")
-        print(f"  Before response (first 150): {result_before['response'][:150]}...")
-        print(f"  After  response (first 150): {result_after['response'][:150]}...")
+        print(f"  Before (first 150): {result_before['response'][:150]}...")
+        print(f"  After  (first 150): {result_after['response'][:150]}...")
 
     print("\n" + "=" * 72)
     print("SUMMARY")
-    print(f"  Token savings per probe: ~{(total_before_input - total_after_input) / len(PROBES):.0f} input tokens")
-    print(f"  Total before: {total_before_input} | Total after: {total_after_input}")
 
     if regressions:
         print(f"\n  REGRESSIONS ({len(regressions)}): {', '.join(regressions)}")
     else:
         print(f"\n  No regressions detected.")
 
-    # Write full results to JSON for review
     output_path = Path(__file__).parent / "results" / "rules-behavioral-results.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
