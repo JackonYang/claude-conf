@@ -75,5 +75,81 @@
 - Bias: 模型写文件时自动切换到"正式文档风格" — 加结构铺垫、磨平棱角、用模版腔。
 - Failure mode: 对话里锋利准确，写进文件就变成"首先...其次...总之..."的官腔，穿透力归零。
 - Evidence: 同一个 north star 表述，对话里一句话说清，写进 README 变成三段铺垫。（verbose 版本中举例"north star、设计决策、README"为高发场景。）
-- Eval probe: 当前无自动化 probe。可通过对比同一内容的对话输出与文件写入风格差异来评估。
+- Eval probe: `comm_same_voice` — 要求写一段 README，观察是否切换到模版风格。
 - Exit condition: 模型写作风格一致性提升，不再出现对话/文件风格割裂。
+
+### 默认中文，代码/commit/PR/技术文档用英文
+
+- Bias: 模型默认用英文回复，或在中文对话中夹杂不必要的英文段落。
+- Failure mode: 用户用中文提问，模型用英文回答，增加认知切换成本。
+- Evidence: 日常对话中模型对中文 prompt 回复英文，尤其在涉及技术概念时。
+- Eval probe: `comm_chinese_default` — 用中文问代码问题，观察是否用中文回复。
+- Exit condition: 模型能稳定根据用户语言自动匹配回复语言。
+
+### 结论先行，说到点上
+
+- Bias: 模型倾向加铺垫、客套、复述用户问题后再给答案。
+- Failure mode: 用户等了两段废话才看到结论，交互效率低。
+- Evidence: 回答技术问题时以"这是一个很好的问题"、"当然可以"、"让我来解释一下"开头。
+- Eval probe: `comm_no_fluff` — 问一个对比类问题，观察是否直接给结论。
+- Exit condition: 模型默认行为就是结论先行，不再需要规则约束。
+
+### 必须附最小充分依据
+
+- Bias: 模型要么给结论不给理由，要么给一堆细节淹没结论。
+- Failure mode: 根因判断、架构取舍等场景下，用户拿到结论但无法判断结论是否可信。
+- Evidence: code review 中模型给出"建议改成 X"但不说为什么，或给出三段理由但最关键的一条埋在中间。
+- Eval probe: 当前无自动化 probe。依赖对话观察是否在关键判断处附依据。
+- Exit condition: 模型能自主判断何时需要附依据、附多少。
+
+### 不确定时不产出，但记录卡在哪
+
+- Bias: 模型倾向在不确定时仍然给出看似确定的答案，而非承认不确定。
+- Failure mode: 用户基于模型不确定的输出做决策，导致错误方向。
+- Evidence: 模型对不熟悉的 API 仍给出具体用法建议，事后验证不存在。与 rule 1（先验证再断言）互补 — rule 1 管事实，这条管判断。
+- Eval probe: 当前无自动化 probe。依赖对话观察不确定场景下的行为。
+- Exit condition: 模型 calibration 达到可靠水平，能准确传达不确定性。
+
+### markdown 不用加粗，用层级/缩进/破折号
+
+- Bias: 模型默认大量使用 `**bold**` 做强调。
+- Failure mode: 加粗过多等于没有强调，视觉噪音大，在终端里尤其刺眼。
+- Evidence: 日常回复中模型对关键词加粗，一段话 5-6 个加粗词，反而模糊重点。
+- Eval probe: 当前无自动化 probe。可通过统计输出中 `**` 出现频率来评估。
+- Exit condition: 模型默认格式化风格与用户偏好一致。
+
+### 专业术语直接用，不解释基础概念，不加 emoji
+
+- Bias: 模型倾向对 senior 用户也解释基础概念，并在输出中加 emoji 增加"友好感"。
+- Failure mode: 解释基础概念浪费 context 和阅读时间；emoji 在代码/技术语境中是噪音。
+- Evidence: 对 Jack 解释"什么是 rebase"或在技术分析中加 ✅ 🔧 等 emoji。
+- Eval probe: 当前无自动化 probe。依赖对话观察。
+- Exit condition: 模型能根据用户 profile 自动调整解释深度和风格。
+
+---
+
+## 自动化运行边界
+
+### 每个 issue/任务在独立 branch 工作
+
+- Bias: 模型有时在当前 branch 继续做不相关的任务，或忘记切 branch。
+- Failure mode: 多个 issue 的改动混在一个 branch，PR 无法按 issue 独立 review 和 merge。
+- Evidence: 出现过两个 issue 的改动混在同一个 PR 里，需要手动拆分。
+- Eval probe: 当前无自动化 probe。依赖 PR review 时检查 branch 命名和内容是否单一。
+- Exit condition: CI 或 hook 自动检查 branch 名与 commit 内容的 issue 关联一致性。
+
+### 连续 3 次 CI 失败停止重试，写 worklog
+
+- Bias: 模型倾向无限重试失败的操作，每次做微小调整但不诊断根因。
+- Failure mode: 消耗大量 token 和时间在重复失败上，产出为零。
+- Evidence: 模型对 CI 失败反复调整 import 顺序、加 type ignore 等表面修复，5 次后仍未解决根本问题。
+- Eval probe: 当前无自动化 probe。依赖对话观察重试行为。
+- Exit condition: 模型具备可靠的根因分析能力，能在 1-2 次尝试内定位问题。
+
+### 自动化可以跑到 PR ready，merge 必须人工确认
+
+- Bias: 模型在获得足够权限时倾向跑完全流程包括 merge。
+- Failure mode: 未经人工 review 的代码进入 main，增加生产风险。
+- Evidence: 无具体 incident，属于预防性规则。在 headless 场景下尤其重要 — agent 可能在无人监督时完成整个 PR 流程。
+- Eval probe: 当前无自动化 probe。依赖 git log 审计是否有未经 review 的 merge。
+- Exit condition: branch protection 和 CI 完全覆盖，merge 物理上需要人工审批。
