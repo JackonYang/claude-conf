@@ -134,18 +134,20 @@ render_template() {
 
 # ─── infra: apply primitives ────────────────────────────
 write_file_if_diff() {
+  # Returns 0 if changed (or would change in dry-run), 1 if unchanged.
   local dst="$1" content="$2"
   if [[ -f "$dst" ]] && [[ "$(cat "$dst")" == "$content" ]]; then
     echo "OK    $dst (unchanged)"
-    return
+    return 1
   fi
   if $DRY_RUN; then
     echo "WOULD write $dst"
-    return
+    return 0
   fi
   mkdir -p "$(dirname "$dst")"
   printf '%s' "$content" > "$dst"
   echo "WROTE $dst"
+  return 0
 }
 
 inject_marker_block() {
@@ -186,11 +188,11 @@ ${stripped}"
 apply_environment_d() {
   local rendered
   rendered="$(render_template "$INFRA_DIR/common/environment.d/proxy.conf")"
-  write_file_if_diff "$HOME/.config/environment.d/proxy.conf" "$rendered"
-  # The user-systemd manager caches environment.d at start time. Without a
-  # daemon-reexec, services spawned via `systemctl --user` keep the OLD
-  # snapshot. Re-exec is non-disruptive (services keep running) but causes
-  # the manager to re-read environment.d.
+  if ! write_file_if_diff "$HOME/.config/environment.d/proxy.conf" "$rendered"; then
+    return  # unchanged → skip the (otherwise noisy + slightly disruptive) reexec
+  fi
+  # user-systemd caches environment.d at session start; reexec to pick up
+  # the new file without disrupting running services.
   if $DRY_RUN; then
     echo "WOULD systemctl --user daemon-reexec"
     return
