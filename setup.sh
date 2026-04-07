@@ -187,6 +187,19 @@ apply_environment_d() {
   local rendered
   rendered="$(render_template "$INFRA_DIR/common/environment.d/proxy.conf")"
   write_file_if_diff "$HOME/.config/environment.d/proxy.conf" "$rendered"
+  # The user-systemd manager caches environment.d at start time. Without a
+  # daemon-reexec, services spawned via `systemctl --user` keep the OLD
+  # snapshot. Re-exec is non-disruptive (services keep running) but causes
+  # the manager to re-read environment.d.
+  if $DRY_RUN; then
+    echo "WOULD systemctl --user daemon-reexec"
+    return
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl --user daemon-reexec 2>/dev/null; then
+      echo "REEXEC user systemd (refreshed environment.d cache)"
+    fi
+  fi
 }
 
 extract_block_body() {
@@ -466,6 +479,18 @@ verify_probes() {
     $1 == "HTTP_PROXY" { print $2; exit }
   ')"
   check_eq "probe[crontab] HTTP_PROXY" "$expected_url" "$p4"
+
+  # Probe 5: user-systemd manager cached env (services started via
+  # `systemctl --user` see this — caught the 105/101 stale cache regression).
+  if command -v systemctl >/dev/null 2>&1; then
+    local p5
+    p5="$(systemctl --user show-environment 2>/dev/null | awk -F= '
+      $1 == "HTTP_PROXY" { print $2; exit }
+    ')"
+    if [[ -n "$p5" ]]; then
+      check_eq "probe[systemd --user] HTTP_PROXY" "$expected_url" "$p5"
+    fi
+  fi
 }
 
 run_verify() {
