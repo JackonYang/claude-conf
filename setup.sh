@@ -404,45 +404,46 @@ verify_systemd_drop_in() {
 
 verify_probes() {
   # Verify the proxy port shows up across the contexts that matter.
+  # Note: there is no "current shell" probe — the verify-time process
+  # inherits parent-shell env, which is stale right after apply changes
+  # ~/.bashrc (the parent shell sourced it at login). The bashrc probe
+  # below is the strict version of that check.
   local expected_url="http://127.0.0.1:${PROXY_PORT}"
 
-  # Probe 1: current verify-time process env
-  check_eq "probe[shell] HTTP_PROXY" "$expected_url" "${HTTP_PROXY:-MISSING}"
-
-  # Probe 2: clean env, source environment.d (simulates PAM/logind session)
-  local p2
-  p2="$(env -i HOME="$HOME" PATH="$PATH" bash -c '
+  # Probe 1: clean env, source environment.d (simulates PAM/logind session)
+  local p1
+  p1="$(env -i HOME="$HOME" PATH="$PATH" bash -c '
     set -a
     [ -f "$HOME/.config/environment.d/proxy.conf" ] && . "$HOME/.config/environment.d/proxy.conf"
     set +a
     printf %s "${HTTP_PROXY:-MISSING}"
   ')"
-  check_eq "probe[environment.d] HTTP_PROXY" "$expected_url" "$p2"
+  check_eq "probe[environment.d] HTTP_PROXY" "$expected_url" "$p1"
 
-  # Probe 3: clean env, source .bashrc (simulates non-interactive ssh)
-  local p3
-  p3="$(env -i HOME="$HOME" PATH="$PATH" bash -c '
+  # Probe 2: clean env, source .bashrc (simulates non-interactive ssh)
+  local p2
+  p2="$(env -i HOME="$HOME" PATH="$PATH" bash -c '
     [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
     printf %s "${HTTP_PROXY:-MISSING}"
   ' 2>/dev/null)"
-  check_eq "probe[bashrc] HTTP_PROXY" "$expected_url" "$p3"
+  check_eq "probe[bashrc] HTTP_PROXY" "$expected_url" "$p2"
 
-  # Probe 4: crontab marker block has the right port
-  local p4
-  p4="$(crontab -l 2>/dev/null | awk -F= '
+  # Probe 3: crontab marker block has the right port
+  local p3
+  p3="$(crontab -l 2>/dev/null | awk -F= '
     $1 == "HTTP_PROXY" { print $2; exit }
   ')"
-  check_eq "probe[crontab] HTTP_PROXY" "$expected_url" "$p4"
+  check_eq "probe[crontab] HTTP_PROXY" "$expected_url" "$p3"
 
-  # Probe 5: user-systemd manager cached env (services started via
+  # Probe 4: user-systemd manager cached env (services started via
   # `systemctl --user` see this — caught the 105/101 stale cache regression).
   if command -v systemctl >/dev/null 2>&1; then
-    local p5
-    p5="$(systemctl --user show-environment 2>/dev/null | awk -F= '
+    local p4
+    p4="$(systemctl --user show-environment 2>/dev/null | awk -F= '
       $1 == "HTTP_PROXY" { print $2; exit }
     ')"
-    if [[ -n "$p5" ]]; then
-      check_eq "probe[systemd --user] HTTP_PROXY" "$expected_url" "$p5"
+    if [[ -n "$p4" ]]; then
+      check_eq "probe[systemd --user] HTTP_PROXY" "$expected_url" "$p4"
     fi
   fi
 }
