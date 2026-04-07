@@ -115,7 +115,6 @@ load_machine_env() {
     exit 3
   fi
   PROXY_PORT=""
-  INSTALL_BUTLER_SYSTEMD=""
   # shellcheck disable=SC1090
   source "$envfile"
   if [[ -z "$PROXY_PORT" ]]; then
@@ -258,38 +257,6 @@ ${stripped}"
   echo "WROTE crontab"
 }
 
-apply_systemd_drop_in() {
-  if [[ "${INSTALL_BUTLER_SYSTEMD:-0}" != "1" ]]; then
-    echo "SKIP  systemd drop-in (not enabled for this machine)"
-    return
-  fi
-  # butler.service runs under the butler user-systemd instance, so the
-  # drop-in only belongs in butler's home — installing it under root is
-  # dead config.
-  if [[ "$(id -un)" != "butler" ]]; then
-    echo "SKIP  systemd drop-in (only installed for user=butler, current=$(id -un))"
-    return
-  fi
-  local target_dir="$HOME/.config/systemd/user/butler.service.d"
-  local rendered
-  rendered="$(render_template "$INFRA_DIR/common/butler-service.conf")"
-  write_file_if_diff "$target_dir/proxy.conf" "$rendered"
-  if $DRY_RUN; then
-    echo "WOULD systemctl --user daemon-reload"
-    return
-  fi
-  if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user daemon-reload 2>/dev/null; then
-      :
-    else
-      echo "WARN  systemctl --user daemon-reload failed (no user session?)"
-    fi
-    if systemctl --user is-active --quiet butler.service 2>/dev/null; then
-      systemctl --user restart butler.service && echo "RESTART butler.service"
-    fi
-  fi
-}
-
 converge_proxy_env_stub() {
   # Old machines have ~/.proxy_env from the previous agent. Keep it as a compat
   # stub but rewrite to canonical PROXY_PORT to eliminate dual-config drift.
@@ -321,7 +288,6 @@ run_apply() {
   apply_environment_d
   apply_bashrc
   apply_crontab
-  apply_systemd_drop_in
   converge_proxy_env_stub
   echo ""
   echo "apply done."
@@ -389,19 +355,6 @@ verify_crontab() {
   check_eq "crontab marker block" "$expected" "$actual"
 }
 
-verify_systemd_drop_in() {
-  if [[ "${INSTALL_BUTLER_SYSTEMD:-0}" != "1" ]]; then
-    return
-  fi
-  if [[ "$(id -un)" != "butler" ]]; then
-    return
-  fi
-  local expected actual
-  expected="$(render_template "$INFRA_DIR/common/butler-service.conf")"
-  actual="$(cat "$HOME/.config/systemd/user/butler.service.d/proxy.conf" 2>/dev/null || echo MISSING)"
-  check_eq "systemd butler.service drop-in" "$expected" "$actual"
-}
-
 verify_probes() {
   # Verify the proxy port shows up across the contexts that matter.
   # Note: there is no "current shell" probe — the verify-time process
@@ -458,7 +411,6 @@ run_verify() {
   verify_environment_d
   verify_bashrc
   verify_crontab
-  verify_systemd_drop_in
   verify_probes
   echo ""
   if (( ${#DRIFT[@]} > 0 )); then
