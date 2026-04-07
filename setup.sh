@@ -135,6 +135,9 @@ render_template() {
 write_file_if_diff() {
   # Returns 0 if changed (or would change in dry-run), 1 if unchanged.
   local dst="$1" content="$2"
+  # \$(cat ...) strips trailing newlines, so trim content the same way for
+  # a stable round-trip comparison across runs.
+  while [[ "$content" == *$'\n' ]]; do content="${content%$'\n'}"; done
   if [[ -f "$dst" ]] && [[ "$(cat "$dst")" == "$content" ]]; then
     echo "OK    $dst (unchanged)"
     return 1
@@ -144,7 +147,7 @@ write_file_if_diff() {
     return 0
   fi
   mkdir -p "$(dirname "$dst")"
-  printf '%s' "$content" > "$dst"
+  printf '%s\n' "$content" > "$dst"
   echo "WROTE $dst"
   return 0
 }
