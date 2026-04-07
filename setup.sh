@@ -283,6 +283,13 @@ apply_systemd_drop_in() {
     echo "SKIP  systemd drop-in (not enabled for this machine)"
     return
   fi
+  # butler.service runs under the butler user-systemd instance, so the
+  # drop-in only belongs in butler's home — installing it under root is
+  # dead config.
+  if [[ "$(id -un)" != "butler" ]]; then
+    echo "SKIP  systemd drop-in (only installed for user=butler, current=$(id -un))"
+    return
+  fi
   local target_dir="$HOME/.config/systemd/user/butler.service.d"
   local rendered
   rendered="$(render_template "$INFRA_DIR/common/butler-service.conf")"
@@ -417,6 +424,9 @@ verify_crontab() {
 
 verify_systemd_drop_in() {
   if [[ "${INSTALL_BUTLER_SYSTEMD:-0}" != "1" ]]; then
+    return
+  fi
+  if [[ "$(id -un)" != "butler" ]]; then
     return
   fi
   local expected actual
