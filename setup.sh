@@ -281,7 +281,7 @@ export https_proxy=http://127.0.0.1:${PROXY_PORT}
 export NO_PROXY=localhost,127.0.0.1,::1,*.aigcic.com,gitlab-sw.aigcic.com,192.168.0.0/16,172.16.0.0/12,10.0.0.0/8
 export no_proxy=localhost,127.0.0.1,::1,*.aigcic.com,gitlab-sw.aigcic.com,192.168.0.0/16,172.16.0.0/12,10.0.0.0/8
 "
-  write_file_if_diff "$stub" "$content"
+  write_file_if_diff "$stub" "$content" || true
 }
 
 run_apply() {
