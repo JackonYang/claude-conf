@@ -239,11 +239,15 @@ apply_crontab() {
       if (!skip) print }
   ' <<< "$current")"
 
-  local new_cron
-  new_cron="${begin}
+  local new_cron="${begin}
 ${header}
-${end}
-${stripped}"
+${end}"
+  if [[ -n "$stripped" ]]; then
+    new_cron+=$'\n'"$stripped"
+  fi
+  # $(crontab -l) above already stripped trailing newlines, so the
+  # comparison stays stable across runs only if new_cron also has none.
+  while [[ "$new_cron" == *$'\n' ]]; do new_cron="${new_cron%$'\n'}"; done
 
   if [[ "$current" == "$new_cron" ]]; then
     echo "OK    crontab (unchanged)"
