@@ -198,6 +198,32 @@ extract_block_body() {
   '
 }
 
+strip_legacy_bashrc_proxy() {
+  # The previous agent injected a 7-line block at top of ~/.bashrc:
+  #   # butler user-level proxy — #24
+  #   export HTTP_PROXY=...
+  #   export HTTPS_PROXY=...
+  #   export http_proxy=...
+  #   export https_proxy=...
+  #   export NO_PROXY=...
+  #   export no_proxy=...
+  # Strip the comment line plus any standalone PROXY exports outside our
+  # marker block so they cannot shadow the marker block at source-time.
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  awk '
+    BEGIN { in_marker=0 }
+    /^# >>> claude-conf proxy >>>$/ { in_marker=1; print; next }
+    /^# <<< claude-conf proxy <<<$/ { in_marker=0; print; next }
+    {
+      if (in_marker) { print; next }
+      if ($0 == "# butler user-level proxy — #24") next
+      if ($0 ~ /^export (HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy)=/) next
+      print
+    }
+  ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+}
+
 apply_bashrc() {
   local block_body
   block_body="$(extract_block_body)"
@@ -205,6 +231,9 @@ apply_bashrc() {
     "# >>> claude-conf proxy >>>" \
     "# <<< claude-conf proxy <<<" \
     "$block_body"
+  if ! $DRY_RUN; then
+    strip_legacy_bashrc_proxy "$HOME/.bashrc"
+  fi
 }
 
 apply_crontab() {
@@ -355,6 +384,23 @@ verify_bashrc() {
   ' "$HOME/.bashrc" 2>/dev/null)"
   [[ -z "$actual" ]] && actual="MISSING"
   check_eq ".bashrc marker block" "$expected" "$actual"
+
+  # Detect stray proxy exports outside the marker block (legacy from prior agent).
+  local stray
+  stray="$(awk -v b="$begin" -v e="$end" '
+    BEGIN { inside=0 }
+    $0 == b { inside=1; next }
+    $0 == e { inside=0; next }
+    inside { next }
+    /^export (HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy)=/ { print NR": "$0 }
+  ' "$HOME/.bashrc" 2>/dev/null)"
+  if [[ -n "$stray" ]]; then
+    echo "DRIFT .bashrc has stray proxy exports outside marker block:"
+    echo "$stray" | sed 's/^/      /'
+    DRIFT+=(".bashrc stray exports")
+  else
+    echo "OK    .bashrc no stray proxy exports"
+  fi
 }
 
 verify_crontab() {
