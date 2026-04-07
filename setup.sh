@@ -211,32 +211,6 @@ extract_block_body() {
   '
 }
 
-strip_legacy_bashrc_proxy() {
-  # The previous agent injected a 7-line block at top of ~/.bashrc:
-  #   # butler user-level proxy — #24
-  #   export HTTP_PROXY=...
-  #   export HTTPS_PROXY=...
-  #   export http_proxy=...
-  #   export https_proxy=...
-  #   export NO_PROXY=...
-  #   export no_proxy=...
-  # Strip the comment line plus any standalone PROXY exports outside our
-  # marker block so they cannot shadow the marker block at source-time.
-  local file="$1"
-  [[ -f "$file" ]] || return 0
-  awk '
-    BEGIN { in_marker=0 }
-    /^# >>> claude-conf proxy >>>$/ { in_marker=1; print; next }
-    /^# <<< claude-conf proxy <<<$/ { in_marker=0; print; next }
-    {
-      if (in_marker) { print; next }
-      if ($0 == "# butler user-level proxy — #24") next
-      if ($0 ~ /^export (HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy)=/) next
-      print
-    }
-  ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
-}
-
 apply_bashrc() {
   local block_body
   block_body="$(extract_block_body)"
@@ -244,9 +218,6 @@ apply_bashrc() {
     "# >>> claude-conf proxy >>>" \
     "# <<< claude-conf proxy <<<" \
     "$block_body"
-  if ! $DRY_RUN; then
-    strip_legacy_bashrc_proxy "$HOME/.bashrc"
-  fi
 }
 
 apply_crontab() {
@@ -266,12 +237,6 @@ apply_crontab() {
       if (skip && $0 == e) { skip=0; next }
       if (!skip) print }
   ' <<< "$current")"
-
-  # Strip leftover bare HTTP_PROXY/etc lines from previous unmanaged installs
-  stripped="$(awk '
-    /^(HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy)=/ { next }
-    { print }
-  ' <<< "$stripped")"
 
   local new_cron
   new_cron="${begin}
@@ -323,18 +288,6 @@ apply_systemd_drop_in() {
   fi
 }
 
-cleanup_bak() {
-  local bak="$HOME/.bashrc.bak-proxy-20260408"
-  if [[ -e "$bak" ]]; then
-    if $DRY_RUN; then
-      echo "WOULD rm $bak"
-    else
-      rm -f "$bak"
-      echo "RM    $bak"
-    fi
-  fi
-}
-
 converge_proxy_env_stub() {
   # Old machines have ~/.proxy_env from the previous agent. Keep it as a compat
   # stub but rewrite to canonical PROXY_PORT to eliminate dual-config drift.
@@ -368,7 +321,6 @@ run_apply() {
   apply_crontab
   apply_systemd_drop_in
   converge_proxy_env_stub
-  cleanup_bak
   echo ""
   echo "apply done."
 }
