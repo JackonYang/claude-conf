@@ -224,46 +224,6 @@ apply_bashrc() {
     "$block_body"
 }
 
-apply_crontab() {
-  local header
-  header="$(render_template "$INFRA_DIR/common/environment.d/proxy.conf")"
-  local begin="# >>> claude-conf proxy >>>"
-  local end="# <<< claude-conf proxy <<<"
-
-  local current=""
-  current="$(crontab -l 2>/dev/null || true)"
-
-  # Strip prior marker block
-  local stripped
-  stripped="$(awk -v b="$begin" -v e="$end" '
-    BEGIN { skip=0 }
-    { if ($0 == b) { skip=1; next }
-      if (skip && $0 == e) { skip=0; next }
-      if (!skip) print }
-  ' <<< "$current")"
-
-  local new_cron="${begin}
-${header}
-${end}"
-  if [[ -n "$stripped" ]]; then
-    new_cron+=$'\n'"$stripped"
-  fi
-  # $(crontab -l) above already stripped trailing newlines, so the
-  # comparison stays stable across runs only if new_cron also has none.
-  while [[ "$new_cron" == *$'\n' ]]; do new_cron="${new_cron%$'\n'}"; done
-
-  if [[ "$current" == "$new_cron" ]]; then
-    echo "OK    crontab (unchanged)"
-    return
-  fi
-  if $DRY_RUN; then
-    echo "WOULD update crontab"
-    return
-  fi
-  printf '%s\n' "$new_cron" | crontab -
-  echo "WROTE crontab"
-}
-
 run_apply() {
   local machine
   machine="$(detect_machine)"
@@ -274,7 +234,6 @@ run_apply() {
   echo ""
   apply_environment_d
   apply_bashrc
-  apply_crontab
   echo ""
   echo "apply done."
 }
@@ -329,18 +288,6 @@ verify_bashrc() {
   fi
 }
 
-verify_crontab() {
-  local expected actual begin="# >>> claude-conf proxy >>>" end="# <<< claude-conf proxy <<<"
-  expected="$(render_template "$INFRA_DIR/common/environment.d/proxy.conf")"
-  actual="$(crontab -l 2>/dev/null | awk -v b="$begin" -v e="$end" '
-    $0 == b { inside=1; next }
-    $0 == e { inside=0; next }
-    inside { print }
-  ')"
-  [[ -z "$actual" ]] && actual="MISSING"
-  check_eq "crontab marker block" "$expected" "$actual"
-}
-
 verify_probes() {
   # Verify the proxy port shows up across the contexts that matter.
   # Note: there is no "current shell" probe — the verify-time process
@@ -367,22 +314,15 @@ verify_probes() {
   ' 2>/dev/null)"
   check_eq "probe[bashrc] HTTP_PROXY" "$expected_url" "$p2"
 
-  # Probe 3: crontab marker block has the right port
-  local p3
-  p3="$(crontab -l 2>/dev/null | awk -F= '
-    $1 == "HTTP_PROXY" { print $2; exit }
-  ')"
-  check_eq "probe[crontab] HTTP_PROXY" "$expected_url" "$p3"
-
-  # Probe 4: user-systemd manager cached env (services started via
+  # Probe 3: user-systemd manager cached env (services started via
   # `systemctl --user` see this — caught the 105/101 stale cache regression).
   if command -v systemctl >/dev/null 2>&1; then
-    local p4
-    p4="$(systemctl --user show-environment 2>/dev/null | awk -F= '
+    local p3
+    p3="$(systemctl --user show-environment 2>/dev/null | awk -F= '
       $1 == "HTTP_PROXY" { print $2; exit }
     ')"
-    if [[ -n "$p4" ]]; then
-      check_eq "probe[systemd --user] HTTP_PROXY" "$expected_url" "$p4"
+    if [[ -n "$p3" ]]; then
+      check_eq "probe[systemd --user] HTTP_PROXY" "$expected_url" "$p3"
     fi
   fi
 }
@@ -396,7 +336,6 @@ run_verify() {
   echo ""
   verify_environment_d
   verify_bashrc
-  verify_crontab
   verify_probes
   echo ""
   if (( ${#DRIFT[@]} > 0 )); then
