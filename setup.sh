@@ -3,12 +3,9 @@
 #
 # Subcommands:
 #   (none)              symlink claude-conf files into ~/.claude/
-#   apply [--dry-run]   render infra/ templates and write per-machine config
+#   apply [--dry-run]   symlink ~/.config/environment.d/proxy.conf and inject
+#                       the proxy block into ~/.bashrc
 #   verify              compare current host state vs infra/ expected; non-zero on drift
-#
-# Flags:
-#   --machine NAME      override hostname → machine detection (jackon.me|116|105|101)
-#   --dry-run           apply: print actions without writing
 
 set -euo pipefail
 
@@ -16,7 +13,6 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 INFRA_DIR="$REPO_DIR/infra"
 DRY_RUN=false
-MACHINE_OVERRIDE=""
 SUBCMD=""
 
 # ─── arg parsing ────────────────────────────────────────
@@ -29,7 +25,6 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)  DRY_RUN=true; shift ;;
-    --machine)  MACHINE_OVERRIDE="$2"; shift 2 ;;
     *)          echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -90,77 +85,54 @@ run_symlink() {
   echo "done."
 }
 
-# ─── infra: hostname → machine ──────────────────────────
-detect_machine() {
-  if [[ -n "$MACHINE_OVERRIDE" ]]; then
-    echo "$MACHINE_OVERRIDE"
+# ─── infra: apply ───────────────────────────────────────
+PROXY_ENV_SRC="$INFRA_DIR/environment.d/proxy.conf"
+PROXY_ENV_DST="$HOME/.config/environment.d/proxy.conf"
+BASHRC_SRC="$INFRA_DIR/bashrc-proxy.sh"
+MARKER_BEGIN="# >>> claude-conf proxy >>>"
+MARKER_END="# <<< claude-conf proxy <<<"
+
+apply_environment_d() {
+  if [[ -L "$PROXY_ENV_DST" && "$(readlink "$PROXY_ENV_DST")" == "$PROXY_ENV_SRC" ]]; then
+    echo "OK    $PROXY_ENV_DST -> $PROXY_ENV_SRC"
     return
   fi
-  local h
-  h="$(hostname)"
-  case "$h" in
-    iZ25e9yr8voZ|jackon.me|jackon-me) echo "jackon.me" ;;
-    aigcic-h3c-01)                    echo "116" ;;
-    aigcic-ai)                        echo "105" ;;
-    aig-a100)                         echo "101" ;;
-    *) echo "ERROR: unknown hostname '$h' — pass --machine NAME" >&2; exit 3 ;;
-  esac
-}
-
-load_machine_env() {
-  local machine="$1"
-  local envfile="$INFRA_DIR/per-machine/${machine}.env"
-  if [[ ! -f "$envfile" ]]; then
-    echo "ERROR: no env file at $envfile" >&2
-    exit 3
-  fi
-  PROXY_PORT=""
-  # shellcheck disable=SC1090
-  source "$envfile"
-  if [[ -z "$PROXY_PORT" ]]; then
-    echo "ERROR: PROXY_PORT not set in $envfile" >&2
-    exit 3
-  fi
-}
-
-render_template() {
-  # Substitute ${PROXY_PORT} only — bash parameter expansion, no envsubst dependency.
-  local src="$1"
-  local content
-  content="$(cat "$src")"
-  printf '%s' "${content//\$\{PROXY_PORT\}/$PROXY_PORT}"
-}
-
-# ─── infra: apply primitives ────────────────────────────
-write_file_if_diff() {
-  # Returns 0 if changed (or would change in dry-run), 1 if unchanged.
-  local dst="$1" content="$2"
-  # \$(cat ...) strips trailing newlines, so trim content the same way for
-  # a stable round-trip comparison across runs.
-  while [[ "$content" == *$'\n' ]]; do content="${content%$'\n'}"; done
-  if [[ -f "$dst" ]] && [[ "$(cat "$dst")" == "$content" ]]; then
-    echo "OK    $dst (unchanged)"
-    return 1
-  fi
   if $DRY_RUN; then
-    echo "WOULD write $dst"
-    return 0
+    echo "WOULD ln -snf $PROXY_ENV_SRC $PROXY_ENV_DST"
+    return
   fi
-  mkdir -p "$(dirname "$dst")"
-  printf '%s\n' "$content" > "$dst"
-  echo "WROTE $dst"
-  return 0
+  mkdir -p "$(dirname "$PROXY_ENV_DST")"
+  ln -snf "$PROXY_ENV_SRC" "$PROXY_ENV_DST"
+  echo "LINK  $PROXY_ENV_DST -> $PROXY_ENV_SRC"
+  # user-systemd caches environment.d at session start; reexec to pick up
+  # the new file without disrupting running services.
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl --user daemon-reexec 2>/dev/null; then
+      echo "REEXEC user systemd (refreshed environment.d cache)"
+    fi
+  fi
 }
 
-inject_marker_block() {
-  # inject_marker_block <file> <begin> <end> <block>
-  # Idempotent: replaces any existing block between markers; inserts at top otherwise.
-  local file="$1" begin="$2" end="$3" block="$4"
+# Marker block body = the lines between the marker comments in BASHRC_SRC.
+extract_block_body() {
+  awk '
+    /^# >>> claude-conf proxy >>>$/ { inside=1; next }
+    /^# <<< claude-conf proxy <<<$/ { inside=0; next }
+    inside { print }
+  ' "$BASHRC_SRC"
+}
+
+apply_bashrc() {
+  local file="$HOME/.bashrc"
+  local block_body
+  block_body="$(extract_block_body)"
+
   local existing=""
   [[ -f "$file" ]] && existing="$(cat "$file")"
 
+  # Strip any existing block between markers, then prepend a fresh one.
   local stripped
-  stripped="$(awk -v b="$begin" -v e="$end" '
+  stripped="$(awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
     BEGIN { skip=0 }
     {
       if ($0 == b) { skip=1; next }
@@ -169,10 +141,9 @@ inject_marker_block() {
     }
   ' <<< "$existing")"
 
-  local new_content
-  new_content="${begin}
-${block}
-${end}
+  local new_content="${MARKER_BEGIN}
+${block_body}
+${MARKER_END}
 ${stripped}"
 
   if [[ "$existing" == "$new_content" ]]; then
@@ -187,54 +158,10 @@ ${stripped}"
   echo "WROTE marker block in $file"
 }
 
-apply_environment_d() {
-  local rendered
-  rendered="$(render_template "$INFRA_DIR/common/environment.d/proxy.conf")"
-  if ! write_file_if_diff "$HOME/.config/environment.d/proxy.conf" "$rendered"; then
-    return  # unchanged → skip the (otherwise noisy + slightly disruptive) reexec
-  fi
-  # user-systemd caches environment.d at session start; reexec to pick up
-  # the new file without disrupting running services.
-  if $DRY_RUN; then
-    echo "WOULD systemctl --user daemon-reexec"
-    return
-  fi
-  if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user daemon-reexec 2>/dev/null; then
-      echo "REEXEC user systemd (refreshed environment.d cache)"
-    fi
-  fi
-}
-
-extract_block_body() {
-  # Strip the marker lines from infra/common/bashrc-proxy.sh, leaving the body.
-  render_template "$INFRA_DIR/common/bashrc-proxy.sh" | awk '
-    /^# >>> claude-conf proxy >>>$/ { inside=1; next }
-    /^# <<< claude-conf proxy <<<$/ { inside=0; next }
-    inside { print }
-  '
-}
-
-apply_bashrc() {
-  local block_body
-  block_body="$(extract_block_body)"
-  inject_marker_block "$HOME/.bashrc" \
-    "# >>> claude-conf proxy >>>" \
-    "# <<< claude-conf proxy <<<" \
-    "$block_body"
-}
-
 run_apply() {
-  local machine
-  machine="$(detect_machine)"
-  load_machine_env "$machine"
-  echo "machine: $machine"
-  echo "PROXY_PORT: $PROXY_PORT"
   $DRY_RUN && echo "(dry run mode)"
-  echo ""
   apply_environment_d
   apply_bashrc
-  echo ""
   echo "apply done."
 }
 
@@ -253,16 +180,19 @@ check_eq() {
 }
 
 verify_environment_d() {
-  local expected actual
-  expected="$(render_template "$INFRA_DIR/common/environment.d/proxy.conf")"
-  actual="$(cat "$HOME/.config/environment.d/proxy.conf" 2>/dev/null || echo MISSING)"
-  check_eq "environment.d/proxy.conf" "$expected" "$actual"
+  if [[ -L "$PROXY_ENV_DST" && "$(readlink "$PROXY_ENV_DST")" == "$PROXY_ENV_SRC" ]]; then
+    echo "OK    environment.d/proxy.conf -> $PROXY_ENV_SRC"
+  else
+    echo "DRIFT environment.d/proxy.conf is not the expected symlink"
+    [[ -e "$PROXY_ENV_DST" ]] && echo "      current: $(readlink -f "$PROXY_ENV_DST" 2>/dev/null || echo "not a symlink")"
+    DRIFT+=("environment.d symlink")
+  fi
 }
 
 verify_bashrc() {
-  local expected actual begin="# >>> claude-conf proxy >>>" end="# <<< claude-conf proxy <<<"
+  local expected actual
   expected="$(extract_block_body)"
-  actual="$(awk -v b="$begin" -v e="$end" '
+  actual="$(awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
     $0 == b { inside=1; next }
     $0 == e { inside=0; next }
     inside { print }
@@ -270,9 +200,10 @@ verify_bashrc() {
   [[ -z "$actual" ]] && actual="MISSING"
   check_eq ".bashrc marker block" "$expected" "$actual"
 
-  # Detect stray proxy exports outside the marker block (legacy from prior agent).
+  # Detect stray proxy exports outside the marker block (e.g. unmanaged
+  # legacy from before this script existed).
   local stray
-  stray="$(awk -v b="$begin" -v e="$end" '
+  stray="$(awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
     BEGIN { inside=0 }
     $0 == b { inside=1; next }
     $0 == e { inside=0; next }
@@ -289,12 +220,10 @@ verify_bashrc() {
 }
 
 verify_probes() {
-  # Verify the proxy port shows up across the contexts that matter.
-  # Note: there is no "current shell" probe — the verify-time process
-  # inherits parent-shell env, which is stale right after apply changes
-  # ~/.bashrc (the parent shell sourced it at login). The bashrc probe
-  # below is the strict version of that check.
-  local expected_url="http://127.0.0.1:${PROXY_PORT}"
+  # Expected value is computed from the SoT file so the script never
+  # has to know the port itself.
+  local expected_url
+  expected_url="$(awk -F= '$1 == "HTTP_PROXY" { print $2; exit }' "$PROXY_ENV_SRC")"
 
   # Probe 1: clean env, source environment.d (simulates PAM/logind session)
   local p1
@@ -328,16 +257,9 @@ verify_probes() {
 }
 
 run_verify() {
-  local machine
-  machine="$(detect_machine)"
-  load_machine_env "$machine"
-  echo "machine: $machine"
-  echo "PROXY_PORT: $PROXY_PORT"
-  echo ""
   verify_environment_d
   verify_bashrc
   verify_probes
-  echo ""
   if (( ${#DRIFT[@]} > 0 )); then
     echo "DRIFT (${#DRIFT[@]} items):"
     for d in "${DRIFT[@]}"; do echo "  - $d"; done
