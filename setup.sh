@@ -264,26 +264,6 @@ ${end}"
   echo "WROTE crontab"
 }
 
-converge_proxy_env_stub() {
-  # Old machines have ~/.proxy_env from the previous agent. Keep it as a compat
-  # stub but rewrite to canonical PROXY_PORT to eliminate dual-config drift.
-  local stub="$HOME/.proxy_env"
-  if [[ ! -f "$stub" ]]; then
-    return
-  fi
-  local content
-  content="# user-level proxy compat stub — managed by claude-conf infra/
-# canonical config: ~/.config/environment.d/proxy.conf
-export HTTP_PROXY=http://127.0.0.1:${PROXY_PORT}
-export HTTPS_PROXY=http://127.0.0.1:${PROXY_PORT}
-export http_proxy=http://127.0.0.1:${PROXY_PORT}
-export https_proxy=http://127.0.0.1:${PROXY_PORT}
-export NO_PROXY=localhost,127.0.0.1,::1,*.aigcic.com,gitlab-sw.aigcic.com,192.168.0.0/16,172.16.0.0/12,10.0.0.0/8
-export no_proxy=localhost,127.0.0.1,::1,*.aigcic.com,gitlab-sw.aigcic.com,192.168.0.0/16,172.16.0.0/12,10.0.0.0/8
-"
-  write_file_if_diff "$stub" "$content" || true
-}
-
 run_apply() {
   local machine
   machine="$(detect_machine)"
@@ -295,7 +275,6 @@ run_apply() {
   apply_environment_d
   apply_bashrc
   apply_crontab
-  converge_proxy_env_stub
   echo ""
   echo "apply done."
 }
