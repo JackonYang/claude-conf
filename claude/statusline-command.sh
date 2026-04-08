@@ -9,8 +9,8 @@ dir=$(basename "$(pwd)")
 case "$raw_host" in
   JackonYangs-MacBook-Pro) host="mac" ;;
   iZ25e9yr8voZ)            host="jackon.me" ;;
-  aigcic-ai)               host="101" ;;
-  aig-a100)                host="105" ;;
+  aigcic-ai)               host="105" ;;
+  aig-a100)                host="101" ;;
   aigcic-h3c-01)           host="116" ;;
   *) host="$raw_host" ;;
 esac
