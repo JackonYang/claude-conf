@@ -123,7 +123,9 @@ mkdir -p "$ISO" && cd "$ISO"
   --allow-all-tools --allow-all-paths \
   -p "$(cat "$PROMPT_FILE")" > out.jsonl
 
-# 提取最终 review
+# 提取最终 review — 这是 inline 示例代码，不是独立的 parser 模块。
+# Non-goals 里"不做 JSONL parser"指的是不维护一个独立工程化解析器；
+# 这一段每次调用现写现用即可，不要把它抽出来变成需要测试 / 升级的产物。
 python3 -c "
 import json
 for line in open('out.jsonl'):
