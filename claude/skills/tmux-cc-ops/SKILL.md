@@ -23,6 +23,8 @@ tmux + Claude Code 操控的 SOP。给调度器（butler 等）做远程/本地 
 5. 永远不替用户决策权限弹窗。识别到 `awaiting_permission` → 上报，不准盲发数字键。教训：jack-vault `sop-1-control-n.md` 记录的 2026-03-21 home-reno 事故。
 6. 同一 (machine, session, window) 不允许并发两个 brief。送 brief 之前必须先 classify，确认是 `idle` 或 `done_unread` 才能送，否则会跟前一个任务的 input 撞车。
 7. 远程操作走 `ssh X 'tmux ...'`，每条命令是独立 ssh exec，不维持长连接。短连接 ssh 控制层是稳定的；长连接交互 shell 是不稳定的（参见规则 1）。
+8. `dead` 必须有积极证据，单纯 `not has_tui` 不构成 dead 判据。积极证据 = last non-empty line 命中 shell prompt 正则 + capture 非空 + 不是刚从 `busy` / `starting` 跳出来（这些状态有几帧 TUI 缺失是正常的）。证据不足时 catch-all 落 `idle`，让调度方靠多次 poll 的 stability 收敛，而不是 classify 一次定生死。误报 dead 会触发"重起 executor"路径，撞上正在启动的 CC、trust-this-directory prompt（已知坑 #7）、或 capture race，直接破坏 owner 介入窗口。
+9. `missing` 是 `capture` primitive 的结构化返回字段，不是 `classify` 的返回值。window/session 不存在 → `capture(...)` 返回 `exists=False`，调用方据此决定是否要 spawn。`classify` 只在 `exists=True && capture_ok=True` 时被调用，只负责"已经在那里、能截到的 pane"的视觉判定。混淆这两个责任会让 classify 用空字符串或 stderr 当输入猜状态，必然误判。
 
 ## Contract
 
@@ -39,64 +41,75 @@ target = (machine, session, window)
 
 操作集：
 
-| op                 | 输入                                  | 输出                                  |
-|--------------------|---------------------------------------|---------------------------------------|
-| spawn_window       | target, cwd, brief (optional)         | target (已起 claude)                  |
-| send_brief         | target, brief_text                    | -                                     |
-| capture            | target, lines=200                     | sanitized text                        |
-| classify_state     | sanitized text, prev_state (optional) | enum (见 State 段)                    |
-| kill_window        | target                                | -                                     |
+| op                 | 输入                                  | 输出                                                              |
+|--------------------|---------------------------------------|-------------------------------------------------------------------|
+| spawn_window       | target, cwd, brief (optional)         | target (已起 claude)                                              |
+| send_brief         | target, brief_text                    | -                                                                 |
+| capture            | target, lines=200                     | dict `{exists, capture_ok, text, stderr}`（text 已 sanitize）     |
+| classify_state     | sanitized text, prev_state (optional) | enum (见 State 段；只在 `exists && capture_ok` 时调用)            |
+| kill_window        | target                                | -                                                                 |
 
 调度方自己持久化 `(target → last_state, last_capture_hash, last_state_at)`，不在本 skill 范围。
 
 ## State enum (核心)
 
-判定函数返回下面 8 个值之一。每个状态给出"判据 + 反例"，判据按从上到下顺序逐条 match，第一个 match 即返回。
+责任分两层：
+
+- `capture(target)` 负责 "pane 在不在 / 能不能截"，返回 `{exists, capture_ok, text, stderr}`。`exists=False` 即调度方语义里的 `missing`，不需要 classify 参与。
+- `classify(sanitized_text, prev_state)` 只在 `exists=True && capture_ok=True` 时被调用，对一个"已经在那里、能截到"的 pane 做视觉判定，返回下面 7 个值之一。判据按从上到下顺序逐条 match，第一个 match 即返回。
 
 ```
-missing            window 不存在
-dead               window 存在但里面不是 CC（shell prompt / 退出）
 starting           CC 正在启动 (splash 还在)
 busy               CC 正在跑 tool / 思考
 awaiting_permission CC 卡在权限弹窗等用户选 1/2/3
 error              CC 在 TUI 内打了 error / panic / traceback
 done_unread        前一轮 busy 跑完，prompt 回到 idle 但还没人收
-idle               空 prompt 等输入（且不是 done_unread）
+idle               空 prompt 等输入（且不是 done_unread）；也是所有"证据不足"情况的 catch-all
+dead               window 存在但里面不是 CC — 必须有积极证据（见下）
 ```
 
-判据（grep 的是 sanitized capture 的最后 ~80 行）：
+调度方语义层另有两个状态，由 `capture` 直接产出，不进 `classify`：
 
-1. missing
-   - 判据: `tmux -L <sock> list-windows -t <session>` 没列出 window，或 `ssh X tmux list-windows -t <session>` 返回 no server / no session
-   - 反例: 不要混淆 "window 不存在" 和 "session 不存在"。session 缺失也归 missing，但调用方决定是否要先建 session。
+```
+missing            capture(...).exists == False (window/session 不存在)
+capture_failed     capture(...).exists == True && capture_ok == False
+                   (tmux 报错但 window 还在，例如 socket race / pane 太窄 / 权限问题)
+```
 
-2. dead
-   - 判据: 末尾 N 行没有 CC TUI 的特征（见下方 idle 判据），且能看到 shell prompt 字符（`$ `, `❯ `, `% `, `# ` 出现在行首），或显式有 `Process completed` / `claude: command not found` / `exit` 回显
-   - 反例: CC 启动中也会短暂没有 TUI；先让 starting 判据先 match。
+判据（grep 的是 sanitized capture 的最后 ~80 行）。`missing` / `capture_failed` 不在 classify 内 — 见上面责任划分。判据顺序与 classifier 实现一致：
 
-3. starting
+1. starting
    - 判据: 出现 `Welcome to Claude Code` / `Loading…` / `Initializing` / 单独的 `claude` 命令回显但还没 TUI box 字符
    - 反例: TUI box 已经画出来 + 有 `>` 输入框 = 不再是 starting。
 
-4. busy
+2. busy
    - 判据: 末尾任意一行包含 `esc to interrupt`，或匹配 spinner 短语正则 `\b(Cogitating|Pondering|Synthesizing|Thinking|Working|Reasoning|Computing|Brewing|Distilling|Hatching|Conjuring|Musing|Marinating|Percolating|Ruminating|Simmering|Stewing|Vibing|Wandering|Whirring)…?\b`，或形如 `(\d+s · [↑↓] [\d.]+k? tokens · esc to interrupt)` 的 footer
    - 反例: 历史输出里出现过 "esc to interrupt" 但当前最末几行没有 → 已经不 busy；要锚定在 last ~5 lines，不是整张 capture。
 
-5. awaiting_permission
+3. awaiting_permission
    - 判据: 末尾 N 行同时出现 `Do you want to` (或 `Allow` / `Approve`) + 形如 `^\s*[│\s]*1\.\s` 的编号选项 + `esc to cancel`（不是 interrupt）
    - 反例: 普通 numbered list 不是权限弹窗。必须三个 marker 同时 match。
 
-6. error
-   - 判据: 末尾出现 `panic:` / `Error: ` 后紧跟 stack / `Traceback (most recent call last)` / `API Error`，且没有 busy spinner、没有权限弹窗
-   - 反例: CC 在工具输出里 echo 了 "Error:" 字样不算（区别：有没有 TUI box 包住、是不是顶层而不是 tool result 内）。判定保守一点，宁愿落到 idle 也不要假报 error。
+4. error
+   - 判据: tail 出现 `panic:` / `Traceback (most recent call last)` / `^API Error`，且 has_tui 为真（被 TUI box 包住），且没有 busy spinner、没有权限弹窗
+   - 反例: CC 在工具输出里 echo 了 "Error:" 字样不算。判定保守一点，宁愿落到 idle 也不要假报 error。
+   - 注意: 只在 `has_tui == True` 时考虑，否则归到 dead/idle 判定路径。
 
-7. done_unread
-   - 判据: 当前满足 idle 的视觉判据（见下），但 prev_state == busy（即上一轮 poll 是 busy）。无 prev_state 时不准返回 done_unread，保守落到 idle。
+5. done_unread
+   - 判据: has_tui 为真 + 当前满足 idle 的视觉判据，但 `prev_state == busy`（即上一轮 poll 是 busy）。无 prev_state 时不准返回 done_unread，保守落到 idle。
    - 替代判据: capture 最后非空行是 Claude 的响应内容（不是 `>` 输入框 echo），且输入框是空的 — 这个判据 false positive 比较高，主用 prev_state 转移。
 
-8. idle
+6. idle
    - 判据: 末尾出现 CC TUI 的输入框特征：`│ > ` / `╰─` 边框 + `? for shortcuts` 一类 footer hint，且没有 spinner、没有权限弹窗、没有 starting splash
-   - 反例: 见 done_unread。
+   - catch-all 角色: 任何"证据不足"的情况（trust-prompt、capture race、空帧、非 TUI 但又不满足 dead 的积极证据）都落 idle。`idle` 是 classify 的安全 default，调度方应当靠多次 poll 的 stability 计数把"持续 idle 但其实是 trust prompt 或 dead pane"的边界 case 收敛掉。
+
+7. dead — 严格要求积极证据，全部满足才返回（hard rule #8）：
+   - last non-empty line 命中 shell prompt 正则（`$` / `❯` / `%` / `#` 在行尾），或 `command not found` / `Process completed` 字样出现在 tail
+   - sanitized text 非空且体量 > 一个最小阈值（避免一帧空白 capture 触发）
+   - tail 内任何一行都没有 CC TUI 特征（`│ >` / `╰─` / `? for shortcuts`）
+   - `prev_state not in (busy, starting)` — 这两个状态有几帧 TUI 缺失是正常的，不算 dead
+   - 反例: trust-this-directory prompt（已知坑 #7）— 非 TUI 提问框，没有 shell prompt 字符，会落 idle 而不是 dead；调度方需要靠单独的 trust-prompt 探测或 stability 计数兜底
+   - 反例: capture race / 短暂空屏 / CC 启动瞬态 — 都不满足"shell prompt at end + 非空 + prev_state 干净"，会落 idle
 
 判定函数的实现骨架（调用方现场抄）：
 
@@ -109,7 +122,9 @@ SPINNER_RE = re.compile(
     r"Percolating|Ruminating|Simmering|Stewing|Vibing|Wandering|Whirring)"
 )
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
-SHELL_PROMPT_RE = re.compile(r"^[^\n]{0,80}[\$❯%#]\s*$", re.MULTILINE)
+# anchored at end of a *single line*: optional cwd + one of $ ❯ % # at the very end
+SHELL_PROMPT_RE = re.compile(r"[\$❯%#]\s*$")
+DEAD_MIN_BYTES = 40   # below this, treat capture as a transient empty frame
 
 def sanitize(raw: str) -> str:
     s = ANSI_RE.sub("", raw)
@@ -122,14 +137,49 @@ def sanitize(raw: str) -> str:
         out.append(ln); prev = ln
     return "\n".join(out)
 
-def classify(text: str, prev_state: str | None = None) -> str:
-    if text is None:
-        return "missing"
-    tail = "\n".join(text.splitlines()[-80:])
-    last5 = "\n".join(text.splitlines()[-5:])
+def capture(target, lines: int = 200) -> dict:
+    """tmux capture-pane wrapper.
+
+    Returns {exists, capture_ok, text, stderr}:
+      exists=False        -> window/session not found ("missing" at scheduler layer)
+      exists=True, capture_ok=False -> tmux errored on a present pane (race / perms)
+      exists=True, capture_ok=True  -> text is sanitized, ready to feed classify()
+
+    Caller adapts run() for local vs ssh; key point is that classify() never
+    has to guess between "no pane" and "blank pane".
+    """
+    proc = run([
+        "tmux", "capture-pane",
+        "-t", f"{target.session}:{target.window}",
+        "-p", "-S", f"-{lines}",
+    ])
+    if proc.returncode == 0:
+        return {"exists": True, "capture_ok": True,
+                "text": sanitize(proc.stdout), "stderr": ""}
+    err = proc.stderr or ""
+    if ("can't find window" in err or "no session" in err
+            or "no server running" in err):
+        return {"exists": False, "capture_ok": False, "text": "", "stderr": err}
+    return {"exists": True, "capture_ok": False, "text": "", "stderr": err}
+
+def classify(sanitized_text: str, prev_state: str | None = None) -> str:
+    """Visual classification of a present, captured pane.
+
+    Precondition (caller's responsibility): the corresponding capture() returned
+    exists=True AND capture_ok=True. Never call classify() with "" / None as a
+    way to ask "is the window there?" — that's capture()'s job.
+
+    Returns one of:
+        starting | busy | awaiting_permission | error | done_unread | idle | dead
+    Never returns "missing".
+    """
+    text = sanitized_text or ""
+    lines = text.splitlines()
+    tail = "\n".join(lines[-80:])
+    last5 = "\n".join(lines[-5:])
+    last_nonempty = next((ln for ln in reversed(lines) if ln.strip()), "")
 
     if re.search(r"Welcome to Claude Code|Loading…|Initializing", tail):
-        # only if no TUI prompt yet
         if "│ >" not in tail and "╰─" not in tail:
             return "starting"
 
@@ -142,26 +192,44 @@ def classify(text: str, prev_state: str | None = None) -> str:
         return "awaiting_permission"
 
     has_tui = ("│ >" in tail) or ("? for shortcuts" in tail) or ("╰─" in tail)
-    if not has_tui:
-        if SHELL_PROMPT_RE.search(tail) or "command not found" in tail:
-            return "dead"
-        # ambiguous — fall through to idle as conservative default
-        # only if there's clearly no CC at all
+
+    if has_tui:
+        if re.search(r"panic:|Traceback \(most recent call last\)|^API Error",
+                     tail, re.MULTILINE):
+            return "error"
+        if prev_state == "busy":
+            return "done_unread"
+        return "idle"
+
+    # No TUI in tail. dead requires POSITIVE evidence (hard rule #8):
+    #   1) shell-prompt char at the end of the last non-empty line, OR
+    #      explicit "command not found" / "Process completed" in tail
+    #   2) capture is non-trivial (guards against transient blank frames)
+    #   3) we are not coming out of busy/starting (those legitimately drop TUI
+    #      for a frame or two — letting that look "dead" is the original bug)
+    dead_signal = (
+        SHELL_PROMPT_RE.search(last_nonempty)
+        or "command not found" in tail
+        or "Process completed" in tail
+    )
+    if (dead_signal
+            and len(text.strip()) >= DEAD_MIN_BYTES
+            and prev_state not in ("busy", "starting")):
         return "dead"
 
-    if re.search(r"panic:|Traceback \(most recent call last\)|^API Error", tail, re.MULTILINE):
-        return "error"
-
-    if prev_state == "busy":
-        return "done_unread"
+    # Ambiguous: trust-this-directory prompt, capture race, transient blank,
+    # post-busy frame. Stay idle and let the scheduler's stability counter
+    # decide whether the pane is really stuck. NEVER catch-all to dead.
     return "idle"
 ```
 
 判定函数的硬约束：
 
 - 输入是 sanitized text（已经走过 `sanitize`），不是 raw capture。raw 里的 ANSI 会让 regex 全 miss。
-- 必须接受 `prev_state`，否则 `done_unread` 这条恒不触发，调度方就无法区分"该收 receipt 了"和"对面在 idle 等输入"。
-- 任何不确定的情况落到 `idle` 而不是 `error`。`error` 会触发调度方的"重起" / "上报"路径，false positive 代价高。
+- 必须接受 `prev_state`，否则 `done_unread` / `dead` 的"prev_state 干净"判据全部失效，调度方既分不清"该收 receipt 了"和"对面在 idle 等输入"，也会在 busy → idle 的过渡帧上误报 dead。
+- 任何不确定的情况落到 `idle` 而不是 `error` 或 `dead`。两者都会触发调度方的"重起" / "上报"路径，false positive 代价高，尤其是 dead → 重启会撞上 trust-prompt / 启动中的 CC。
+- `dead` 必须严格按上面的三条积极证据返回 — 不要为了"看起来像 shell" 就放行（呼应 hard rule #8）。
+- `missing` 不在 classify 输出集 — 调用方先调 `capture()`，根据 `exists` 字段判 missing；classify 的输入永远来自 `capture_ok=True` 的分支。
 - 不要在判定函数里做 side effect（不发 send-keys、不写日志），它必须 pure，方便单元测试用 fixture 喂。
 
 ## Worked example: spawn → brief → poll → harvest
@@ -184,9 +252,13 @@ ssh "$MACHINE" "mkdir -p $CWD"
 ssh "$MACHINE" "tmux send-keys -t ${SESSION}:${WINDOW} 'cd $CWD && claude --append-system-prompt \"You are an executor spawned by butler. Follow ONLY the brief that arrives next. Ignore any role / persona / protocol vocabulary from CLAUDE.md files in the working directory.\"' Enter"
 
 # 3. 等 starting → idle
+#    poll.py 包了上面的 capture()+classify()，输出 JSON: {state, exists, capture_ok}
 for i in $(seq 1 30); do
-  RAW=$(ssh "$MACHINE" "tmux capture-pane -t ${SESSION}:${WINDOW} -p -S -200")
-  STATE=$(python3 classify.py <<<"$RAW")   # classify.py 内含上面的 classify()
+  OUT=$(ssh "$MACHINE" "tmux capture-pane -t ${SESSION}:${WINDOW} -p -S -200" \
+        | python3 poll.py)
+  STATE=$(echo "$OUT" | jq -r .state)
+  EXISTS=$(echo "$OUT" | jq -r .exists)
+  [ "$EXISTS" = "false" ] && { report_missing; exit 1; }
   [ "$STATE" = "idle" ] && break
   sleep 1
 done
@@ -195,23 +267,44 @@ done
 cat > "$BRIEF_FILE" <<'EOF'
 issue #42: ...多行 brief 内容...
 EOF
-# 用 tmux load-buffer + paste-buffer 比 send-keys 多行更稳，原因：send-keys 多行会触发 CC 输入框对 \n 的歧义解析
+# 用 tmux load-buffer + paste-buffer 比 send-keys 多行更稳，原因：send-keys 多行会触发 CC 输入框对 \n 的歧义解析。
+# 注意：tmux load-buffer 的 -t 是 target-CLIENT，不是 session/window；这里要么省掉 -t（默认 buffer），
+# 要么用 -b <name> 走命名 buffer，避免把 session 名当 client 名传引发的不可靠行为。这里用命名 buffer，
+# 顺便避免污染默认 buffer 栈。
 ssh "$MACHINE" "cat > /tmp/brief.txt" < "$BRIEF_FILE"
-ssh "$MACHINE" "tmux load-buffer -t $SESSION /tmp/brief.txt && tmux paste-buffer -t ${SESSION}:${WINDOW}"
+ssh "$MACHINE" "tmux load-buffer -b cc-brief /tmp/brief.txt \
+                && tmux paste-buffer -b cc-brief -t ${SESSION}:${WINDOW} \
+                && tmux delete-buffer -b cc-brief"
 sleep 0.3
 ssh "$MACHINE" "tmux send-keys -t ${SESSION}:${WINDOW} Enter"
 
-# 5. poll loop — 每 N 秒 capture + classify，落 prev_state 状态机
+# 5. poll loop — 每 N 秒 capture + classify，落 prev_state 状态机。
+#    capture() 把 missing / capture_failed 直接出在 JSON 里，classify() 只见
+#    "存在且能截到"的 pane，所以 case 里 missing / capture_failed 走独立分支。
+#    DEAD_STREAK 让调度方对 dead 做 stability 收敛 — 单次 dead 不动作，
+#    避免误报触发重启撞上 trust-prompt / 启动中的 CC（hard rule #8）。
 PREV=busy
+DEAD_STREAK=0
 while true; do
-  RAW=$(ssh "$MACHINE" "tmux capture-pane -t ${SESSION}:${WINDOW} -p -S -200")
-  STATE=$(PREV_STATE=$PREV python3 classify.py <<<"$RAW")
+  OUT=$(ssh "$MACHINE" "tmux capture-pane -t ${SESSION}:${WINDOW} -p -S -200" \
+        | PREV_STATE=$PREV python3 poll.py)
+  EXISTS=$(echo "$OUT" | jq -r .exists)
+  CAPTURE_OK=$(echo "$OUT" | jq -r .capture_ok)
+  STATE=$(echo "$OUT" | jq -r .state)
+
+  if [ "$EXISTS" = "false" ]; then report_missing; break; fi
+  if [ "$CAPTURE_OK" = "false" ]; then sleep 5; continue; fi   # tmux race, retry
+
   case "$STATE" in
-    busy) ;;                                        # 继续等
-    awaiting_permission) report_to_owner; break ;;  # 上报，不代选
-    error) report_error; break ;;
-    dead|missing) report_dead; break ;;
-    done_unread) harvest_capture; break ;;          # 收尾，写 receipt
+    busy)               DEAD_STREAK=0 ;;                              # 继续等
+    awaiting_permission) report_to_owner; break ;;                    # 上报，不代选
+    error)              report_error; break ;;
+    dead)
+      DEAD_STREAK=$((DEAD_STREAK + 1))
+      [ "$DEAD_STREAK" -ge 3 ] && { report_dead; break; }             # 3 连 dead 才动手
+      ;;
+    done_unread)        harvest_capture; break ;;                     # 收尾，写 receipt
+    idle)               DEAD_STREAK=0 ;;                              # idle 是 catch-all，重置计数
   esac
   PREV=$STATE
   sleep 30
@@ -222,13 +315,13 @@ done
 
 ## 已知坑
 
-1. tmux send-keys 提交多行 input — 用 `load-buffer + paste-buffer + 单独 Enter`，不要 `send-keys "$(cat brief.txt)" Enter`。后者把内嵌 \n 当 Enter，CC 输入框会断成多个不完整 prompt。
+1. tmux send-keys 提交多行 input — 用 `load-buffer + paste-buffer + 单独 Enter`，不要 `send-keys "$(cat brief.txt)" Enter`。后者把内嵌 \n 当 Enter，CC 输入框会断成多个不完整 prompt。重点：`tmux load-buffer` 的 `-t` 是 **target-client**（man tmux），不是 session/window；`tmux load-buffer -t $SESSION ...` 是把 session 名当 client 名传，行为不可靠（≥ 3.x 上要么 silently 落到默认 client，要么直接报错）。要么省掉 `-t`（默认 buffer），要么走命名 buffer：`tmux load-buffer -b cc-brief file && tmux paste-buffer -b cc-brief -t $SESSION:$WINDOW && tmux delete-buffer -b cc-brief`。worked example 用的是后者，避免污染默认 buffer 栈。
 2. capture-pane 默认只截可见区域 — 必须 `-S -200`（或更大）取 history。CC TUI 滚屏快，不取 history 容易 miss spinner 行。
 3. ANSI 不剥不要 grep — CC TUI 大量 SGR 序列把 "esc to interrupt" 切成片段，正则全 miss。先 sanitize 再 classify。
 4. spinner 词表会随 CC 版本扩 — 上面 SPINNER_RE 是 2026-03 的快照，发现新词加进去，不要假定枚举完整。busy 的兜底判据是 `esc to interrupt` 这串字符，比 spinner 词更稳。
 5. SSH ControlMaster 跟 tmux 不冲突，但跟"tmux 跑在本地套 ssh"那种错用法叠加会让症状更迷惑（断连后 mux 还假装活着）。一律按 hard rule #1 走。
 6. status-line / vim-airline 之类装饰会让同一信息每秒刷新，sanitize 必须做"连续相同行去重"，否则 last-N-lines 全是 status-line 噪音。
-7. CC 启动如果遇到未授权目录 / sandbox prompt，会卡在一个非 TUI 的"是否信任此目录"提问 — 这种情况判定函数会返回 dead 或 starting，调度方需要单独有"trust prompt" 探测，本 skill 的 classify 不覆盖这条边界。
+7. CC 启动如果遇到未授权目录 / sandbox prompt，会卡在一个非 TUI 的"是否信任此目录"提问 — 这种情况判定函数会落 `idle`（catch-all，因为不满足 dead 的积极证据），调度方需要单独有"trust prompt" 探测（grep `Do you trust the files` / `trust this directory` 之类），本 skill 的 classify 不覆盖这条边界。注意：旧版 SOP 这里说的是 "dead 或 starting"，是因为旧 classify 错把 not-has-tui 当 dead；新版已收紧（hard rule #8），trust-prompt 现在落 idle，调度方靠 stability 计数 + 显式 trust 探测兜底，而不是被错误的 dead 触发重启。
 8. window name 含特殊字符（`/`, `:`, 空格）会让 `tmux ... -t session:window` 解析失败。命名时只用 `[A-Za-z0-9_-]`。
 9. `tmux has-session` 在远程返回 "no server running" 是正常的（第一次 spawn），按 idempotent 处理，不要把它当 error。
 10. `--append-system-prompt` vs `--system-prompt` — append 保留 CC 的工具能力，replace 会把工具描述也覆盖掉导致 CC 不会调用 tool。executor 隔离用 append，不要用 replace。
