@@ -1,9 +1,9 @@
 ---
-name: copilot-second-opinion
+name: skeptic
 description: Second-opinion review on a PR or issue via GitHub Copilot CLI (a different model family from Claude). Two modes — manual gpt-5.4 for high-stake moments, automatic gpt-4.1 sub-agent in parallel during Claude self-review for blind-spot coverage.
 ---
 
-# copilot-second-opinion
+# skeptic
 
 让另一个模型家族（OpenAI via Copilot CLI）对 Claude 的判断做 second opinion。Claude review Claude 是同模型同 bias，对方向 blind spot 几乎无效，需要"非 Claude 的眼睛"来兜底。
 
@@ -142,7 +142,7 @@ rm -rf "$ISO" "$PROMPT_FILE"
 
 主线 Claude 在 self-review 节点，同时发起一个 sub-agent（Agent tool / Task tool），交给它如下任务：
 
-> 你是 copilot-second-opinion 的 Mode B sub-agent。任务：用 `~/.claude/skills/copilot-second-opinion/SKILL.md` 里的模板 1 + `gpt-4.1` 模型，对 PR #<N>（issue #<M>）跑一次 second-opinion review。完成后把 copilot 的最终 markdown 输出原样返回，不要总结、不要重写。
+> 你是 skeptic 的 Mode B sub-agent。任务：用 `~/.claude/skills/skeptic/SKILL.md` 里的模板 1 + `gpt-4.1` 模型，对 PR #<N>（issue #<M>）跑一次 second-opinion review。完成后把 copilot 的最终 markdown 输出原样返回，不要总结、不要重写。
 
 主线继续跑自己的 self-review 不等待 sub-agent。两份输出最后并列呈现给 owner，owner 看哪份戳出对方没看到的点。
 
