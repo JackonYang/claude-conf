@@ -190,26 +190,35 @@ verify_environment_d() {
 }
 
 verify_bashrc() {
+  local bashrc_path="$HOME/.bashrc"
   local expected actual
   expected="$(extract_block_body)"
-  actual="$(awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
-    $0 == b { inside=1; next }
-    $0 == e { inside=0; next }
-    inside { print }
-  ' "$HOME/.bashrc" 2>/dev/null)"
+  if [[ -r "$bashrc_path" ]]; then
+    actual="$(awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
+      $0 == b { inside=1; next }
+      $0 == e { inside=0; next }
+      inside { print }
+    ' "$bashrc_path" 2>/dev/null)"
+  else
+    actual=""
+  fi
   [[ -z "$actual" ]] && actual="MISSING"
   check_eq ".bashrc marker block" "$expected" "$actual"
 
   # Detect stray proxy exports outside the marker block (e.g. unmanaged
   # legacy from before this script existed).
   local stray
-  stray="$(awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
-    BEGIN { inside=0 }
-    $0 == b { inside=1; next }
-    $0 == e { inside=0; next }
-    inside { next }
-    /^export (HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy)=/ { print NR": "$0 }
-  ' "$HOME/.bashrc" 2>/dev/null)"
+  if [[ -r "$bashrc_path" ]]; then
+    stray="$(awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
+      BEGIN { inside=0 }
+      $0 == b { inside=1; next }
+      $0 == e { inside=0; next }
+      inside { next }
+      /^export (HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy)=/ { print NR": "$0 }
+    ' "$bashrc_path" 2>/dev/null)"
+  else
+    stray=""
+  fi
   if [[ -n "$stray" ]]; then
     echo "DRIFT .bashrc has stray proxy exports outside marker block:"
     echo "$stray" | sed 's/^/      /'
