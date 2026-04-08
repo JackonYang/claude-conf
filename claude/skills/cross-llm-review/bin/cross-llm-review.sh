@@ -101,15 +101,24 @@ PR_META_JSON="$ISO_DIR/pr-meta.json"
 PR_DIFF="$ISO_DIR/pr.diff"
 PR_BUNDLE="$ISO_DIR/pr-bundle.md"
 
+# gh stderr is captured to a file and surfaced on failure rather than
+# discarded — auth/network/permission errors need to reach the caller, a
+# generic "failed to fetch" with no underlying message is undebuggable.
+GH_META_ERR="$ISO_DIR/gh-meta.err"
 if ! gh pr view "$PR_NUM" "${GH_REPO_FLAG[@]}" \
        --json number,title,body,author,baseRefName,headRefName,state,url,additions,deletions,changedFiles \
-       > "$PR_META_JSON" 2>/dev/null; then
+       > "$PR_META_JSON" 2> "$GH_META_ERR"; then
   echo "failed to fetch PR metadata for $PR_REF" >&2
+  echo "--- gh stderr ---" >&2
+  cat "$GH_META_ERR" >&2
   exit 4
 fi
 
-if ! gh pr diff "$PR_NUM" "${GH_REPO_FLAG[@]}" > "$PR_DIFF" 2>/dev/null; then
+GH_DIFF_ERR="$ISO_DIR/gh-diff.err"
+if ! gh pr diff "$PR_NUM" "${GH_REPO_FLAG[@]}" > "$PR_DIFF" 2> "$GH_DIFF_ERR"; then
   echo "failed to fetch PR diff for $PR_REF" >&2
+  echo "--- gh stderr ---" >&2
+  cat "$GH_DIFF_ERR" >&2
   exit 4
 fi
 

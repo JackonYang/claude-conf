@@ -114,3 +114,14 @@ needed — once this directory is in the repo, `./setup.sh` on each of the 5
 machines picks it up.
 
 Per-machine prerequisite: `copilot` CLI installed and authenticated.
+
+## Known v0 limitations (followup)
+
+- **ARG_MAX on huge PRs.** The PR bundle is inlined into the prompt and
+  passed via `-p "$(cat ./prompt.md)"`. On macOS `getconf ARG_MAX` ≈ 256KB;
+  on Linux usually 2MB. PRs whose bundle exceeds the local limit will be
+  truncated or rejected by the shell with no friendly error. Followup is to
+  switch to a stdin-fed prompt form or a copilot CLI flag that reads the
+  prompt from a file. Not fixed in v0 because every PR exercised so far is
+  well under the limit; raised by the meta-dogfood self-review of #23.
+
