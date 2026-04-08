@@ -19,6 +19,16 @@
 
 set -euo pipefail
 
+# ─── PATH augmentation ──────────────────────────────────
+# This script is meant to be self-contained: callable from cron, launchd,
+# systemd --user, butler dispatch, or any other context where PATH may not
+# include Homebrew or local bin dirs. Augment PATH with the standard
+# Homebrew locations on both macOS arch flavors and Linuxbrew, plus the
+# usual local bins. We append rather than prepend so the caller's PATH
+# still wins for any binary they care to override.
+PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin"
+export PATH
+
 PR_REF=""
 MODEL="gpt-4.1"
 OUT_FILE=""
@@ -215,11 +225,19 @@ RAW_OUT="$ISO_DIR/copilot.jsonl"
 }
 
 # ─── parse JSONL → final markdown ───────────────────────
+# IMPORTANT: if no assistant.message is present (quota exhausted, rate
+# limit, copilot returned only an error event, malformed JSONL, etc.) we
+# MUST exit non-zero. A successful exit with a placeholder string would
+# let callers (butler, CI, humans) treat a failed review as if it had
+# succeeded — the entire point of this skill is the verdict, so a missing
+# verdict is a hard failure.
+set +e
 REVIEW_MD="$(python3 - "$RAW_OUT" <<'PY'
 import json, sys
 path = sys.argv[1]
 last_msg = None
 usage = None
+errors = []
 with open(path) as f:
     for line in f:
         line = line.strip()
@@ -229,17 +247,25 @@ with open(path) as f:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        t = obj.get("type")
+        t = obj.get("type", "")
         if t == "assistant.message":
             content = obj.get("data", {}).get("content")
             if content:
                 last_msg = content
         elif t == "result":
             usage = obj.get("usage", {})
+        elif "error" in t.lower() or obj.get("data", {}).get("error"):
+            errors.append(obj)
 
 if not last_msg:
-    print("(no assistant message in copilot output)")
-    sys.exit(0)
+    sys.stderr.write("cross-llm-review: copilot returned no assistant message\n")
+    if errors:
+        sys.stderr.write("--- copilot error events ---\n")
+        for e in errors[:5]:
+            sys.stderr.write(json.dumps(e)[:500] + "\n")
+    else:
+        sys.stderr.write("(no error events in JSONL either — likely quota exhausted, rate limited, or malformed output)\n")
+    sys.exit(6)
 
 print(last_msg.rstrip())
 print()
@@ -251,6 +277,15 @@ if usage:
     print(f"_cross-llm-review · model: see invocation · premiumRequests: {pr} · api: {api_ms}ms · session: {sess_ms}ms_")
 PY
 )"
+PARSE_STATUS=$?
+set -e
+
+if [[ $PARSE_STATUS -ne 0 ]]; then
+  echo "$REVIEW_MD" >&2
+  echo "" >&2
+  echo "Raw JSONL kept for debugging: re-run with --keep-iso to inspect $ISO_DIR/copilot.jsonl" >&2
+  exit "$PARSE_STATUS"
+fi
 
 if [[ -n "$OUT_FILE" ]]; then
   printf '%s\n' "$REVIEW_MD" > "$OUT_FILE"
