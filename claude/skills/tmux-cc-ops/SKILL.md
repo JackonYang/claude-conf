@@ -1,6 +1,6 @@
 ---
 name: tmux-cc-ops
-description: Primitives for spawning, prompting, capturing, and state-classifying remote/local Claude Code sessions running inside tmux windows. Use when a scheduler/butler needs to operate CC sessions as worker pool — spawn on (machine, session, window), send a brief, poll pane to decide idle / busy / awaiting-permission / done-unread / dead. Not for interactive single-session use.
+description: Primitives for spawning, prompting, capturing, and state-classifying remote/local Claude Code sessions running inside tmux windows. Use when a scheduler/butler needs to operate CC sessions as worker pool — spawn on (machine, session, window), send a brief, poll pane to decide idle / busy / awaiting_permission / done-unread / dead. Not for interactive single-session use.
 ---
 
 # tmux-cc-ops
@@ -215,8 +215,12 @@ def classify(sanitized_text: str, prev_state: str | None = None) -> str:
     has_tui = ("│ >" in tail) or ("? for shortcuts" in tail) or ("╰─" in tail)
 
     if has_tui:
+        # has_tui is a coarse guard — error keywords anywhere in the 80-line tail
+        # can false-positive when a tool prints "API Error" while TUI is still up.
+        # This check is intentionally conservative (prefer idle over false error).
+        # Callers must NOT use "error" state to trigger destructive operations.
         if re.search(r"panic:|Traceback \(most recent call last\)|^API Error",
-                     tail, re.MULTILINE):
+                     tail[-10:], re.MULTILINE):
             return "error"
         if prev_state == "busy":
             return "done_unread"
