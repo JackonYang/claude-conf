@@ -99,54 +99,20 @@ tmux kill-window -t ${SESSION}:${WINDOW}
 
 ## CC 状态判定
 
-从 capture-pane 输出判断 CC 在做什么：
+`tmux capture-pane -t ${SESSION}:${WINDOW} -p -S -20 | tail -10` 看输出判断：
 
-| state | 判据（sanitized tail ~80 行，顺序 match） |
+| 看到什么 | CC 在做什么 |
 |---|---|
-| starting | 出现 `Welcome to Claude Code` / `Loading…` / `Initializing`，且无 TUI box 字符 |
-| busy | last5 含 `esc to interrupt`，或 spinner 词（Cogitating/Thinking/Working 等）+ `…` |
-| awaiting_permission | tail 同时含 `Do you want to`/`Allow` + 编号选项 `1.` + `esc to cancel` |
-| error | tail[-10:] 含 `panic:` / `Traceback` / `^API Error`，且 has_tui=True |
-| done_unread | has_tui=True + idle 视觉判据 + `prev_state == busy` |
-| idle | TUI 输入框特征（`│ > ` / `╰─` / `? for shortcuts`），或证据不足的 catch-all |
-| dead | 积极证据全满足：shell prompt 在末行 + capture 非空 + prev_state 不在 busy/starting |
+| spinner 词（Thinking/Working/Cogitating...）+ `esc to interrupt` | 在跑，等着 |
+| `Do you want to` + 编号选项 + `esc to cancel` | 等权限确认，上报 owner |
+| `❯ ` 提示符，无 spinner | idle，可以发指令 |
+| `Welcome to Claude Code` / `Loading` | 正在启动 |
+| `panic:` / `Traceback` / `API Error` | 出错了 |
+| shell `$` / `%` 提示符，无 CC TUI | CC 已退出 |
 
-调度方语义层：`missing`（`exists=False`）、`capture_failed`（`exists=True, capture_ok=False`）不进 classify。
+也可以用 pane_title 快速预判：`tmux display-message -p -t ${SESSION}:${WINDOW} "#{pane_title}"` — 首字符是 braille 旋转动画 = busy，✳ = idle。注意 CC crash 后 pane_title 可能保留旧值，需配合 capture-pane 确认。
 
-classify 实现要点：
-- 输入必须是 sanitized text，接受 `prev_state` 参数
-- catch-all 是 `idle` 不是 `dead`；`dead` 必须严格按积极证据返回
-- 函数必须 pure，无 side effect
-
-## Worked example: spawn → brief → poll → harvest
-
-```bash
-MACHINE=116; SESSION=jack; WINDOW="42-pr-review"
-# 1. spawn（在远端开窗，不是本地）
-ssh "$MACHINE" "tmux has-session -t $SESSION 2>/dev/null || tmux new-session -d -s $SESSION"
-ssh "$MACHINE" "tmux new-window -t ${SESSION}: -n ${WINDOW} && cd /tmp && claude"
-
-# 2. send brief（两步：paste + 单独 Enter；用命名 buffer 避免 -t 歧义）
-ssh "$MACHINE" "cat > /tmp/brief-${WINDOW}.txt" < brief.txt
-ssh "$MACHINE" "tmux load-buffer -b cc-brief /tmp/brief-${WINDOW}.txt \
-  && tmux paste-buffer -b cc-brief -t ${SESSION}:${WINDOW} \
-  && tmux delete-buffer -b cc-brief"
-sleep 0.3 && ssh "$MACHINE" "tmux send-keys -t ${SESSION}:${WINDOW} Enter"
-
-# 3. poll loop（prev_state 驱动状态机，dead streak 防误报）
-PREV=busy; DEAD_STREAK=0
-while true; do
-  STATE=$(ssh "$MACHINE" "tmux capture-pane -t ${SESSION}:${WINDOW} -p -S -200" | PREV_STATE=$PREV python3 poll.py | jq -r .state)
-  case "$STATE" in
-    busy)                DEAD_STREAK=0 ;;
-    awaiting_permission) report_to_owner; break ;;
-    done_unread)         harvest_capture; break ;;
-    dead) DEAD_STREAK=$((DEAD_STREAK+1)); [ $DEAD_STREAK -ge 3 ] && { report_dead; break; } ;;
-    idle) DEAD_STREAK=0 ;;
-  esac
-  PREV=$STATE; sleep 30
-done
-```
+关键原则：不确定时当 idle 处理，不要猜 dead。dead 需要看到 shell 提示符等积极证据。
 
 ## 已知坑
 
