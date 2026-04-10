@@ -20,11 +20,27 @@ tmux + Claude Code 操控的 SOP。给调度器（butler 等）做远程/本地 
 2. spawn CC 时必须切到隔离 cwd，并显式 `--append-system-prompt` 注入"本会话是 executor，照 brief 干活，不要受 cwd CLAUDE.md 里 protocol 词汇拐走"。否则远端 CLAUDE.md（waypoint / jack-vault 等）会立刻把新会话拽进特定 role，brief 失效。
 3. send-keys 提交 prompt 必须是两步：先 paste 文本（literal mode），再单独发一次 `Enter`。一步走 `send-keys "text" Enter` 在多行 brief 上会被解释成 `text\n` 而不是"提交输入框"，CC 会收到一个不完整 prompt。
 4. 状态判定只能基于 sanitized capture-pane 输出（去 ANSI、去 status-line 噪音、保留最后 N 行），不准基于 exit code、tmux pane status、或脑补的时序。判定函数错杀 = 调度系统幻觉。
-5. 永远不替用户决策权限弹窗。识别到 `awaiting_permission` → 上报，不准盲发数字键。教训：jack-vault `sop-1-control-n.md` 记录的 2026-03-21 home-reno 事故。
+5. 永远不替用户决策权限弹窗。识别到 `awaiting_permission` → 上报，不准盲发数字键。绝对禁止向多个 window 盲发 y/Enter — 必须先 capture-pane 确认是权限弹窗（含 Yes/No + esc to cancel）才放行。教训：jack-vault `sop-1-control-n.md` 记录的 2026-03-21 home-reno 事故 — 盲发 y 导致 3 个 window 的决策被自动选 A。
 6. 同一 (machine, session, window) 不允许并发两个 brief。送 brief 之前必须先 classify，确认是 `idle` 或 `done_unread` 才能送，否则会跟前一个任务的 input 撞车。
 7. 远程操作走 `ssh X 'tmux ...'`，每条命令是独立 ssh exec，不维持长连接。短连接 ssh 控制层是稳定的；长连接交互 shell 是不稳定的（参见规则 1）。
 8. `dead` 必须有积极证据，单纯 not-has-tui 不构成 dead 判据。积极证据 = last non-empty line 命中 shell prompt 正则 + capture 非空 + 不是刚从 `busy` / `starting` 跳出来（这些状态有几帧 TUI 缺失是正常的）。证据不足时 catch-all 落 `idle`，让调度方靠多次 poll 的 stability 计数把"持续 idle 但其实是 trust prompt 或 dead pane"的边界 case 收敛掉。误报 dead 会触发"重起 executor"路径，撞上正在启动的 CC、trust-this-directory prompt（已知坑 #7）、或 capture race，直接破坏 owner 介入窗口。
 9. `missing` 是 `capture` primitive 的结构化返回字段，不是 `classify` 的返回值。window/session 不存在 → `capture(...)` 返回 `exists=False`，调用方据此决定是否要 spawn。`classify` 只在 `exists=True && capture_ok=True` 时被调用，只负责"已经在那里、能截到的 pane"的视觉判定。混淆这两个责任会让 classify 用空字符串或 stderr 当输入猜状态，必然误判。
+
+## pane_title 状态判定
+
+CC 通过 OSC 转义序列设置终端标题，tmux 自动捕获为 `pane_title`。用它做首轮 busy/idle 判定比纯 capture-pane regex 更可靠 — background agent 运行时 capture-pane 可能显示 `❯` 误判为 idle，但 pane_title 的首字符不会撒谎。
+
+```bash
+tmux display-message -p -t {session}:{window} "#{pane_title}"
+```
+
+判定规则（首轮快速判断）：
+
+- 首字符是 braille (U+2800–U+28FF) → busy（CC 在跑，旋转动画）
+- 首字符是 ✳ (U+2733) → idle
+- 其他 / 空 → 不确定，降级到 capture-pane + classify 做二次确认
+
+推荐用法：先查 `pane_title` 做轻量预判；当 pane_title 不确定或需要更细粒度状态（done_unread、awaiting_permission 等）时，再走完整 capture + classify 流程。两者互补，不是替代关系。
 
 ## Contract
 
@@ -236,6 +252,30 @@ def classify(sanitized_text: str, prev_state: str | None = None) -> str:
 - `missing` 不在 classify 输出集 — 调用方先调 `capture()`，根据 `exists` 字段判 missing；classify 的输入永远来自 `capture_ok=True` 的分支。
 - 不要在判定函数里做 side effect（不发 send-keys、不写日志），它必须 pure，方便单元测试用 fixture 喂。
 
+## 多 executor 布局：2 行 3 列 grid
+
+需要同时跑多个 executor 并肉眼监控时，tiled 布局最省事：
+
+```bash
+SESSION=jack
+WINDOW="executor-pool"
+
+# 先确保 window 存在
+ssh "$MACHINE" "tmux new-window -t ${SESSION}: -n ${WINDOW}"
+
+# 再 split 5 次 = 共 6 panes
+ssh "$MACHINE" "tmux split-window -t ${SESSION}:${WINDOW}"
+ssh "$MACHINE" "tmux split-window -t ${SESSION}:${WINDOW}"
+ssh "$MACHINE" "tmux split-window -t ${SESSION}:${WINDOW}"
+ssh "$MACHINE" "tmux split-window -t ${SESSION}:${WINDOW}"
+ssh "$MACHINE" "tmux split-window -t ${SESSION}:${WINDOW}"
+
+# tiled 自动排成 2x3 grid
+ssh "$MACHINE" "tmux select-layout -t ${SESSION}:${WINDOW} tiled"
+```
+
+注意：pane 数不是 6 的整数倍时，tiled 会做不均匀切分，视觉上最后一列可能只有 1 行。可以接受，调度层不感知 pane 布局。
+
 ## Worked example: spawn → brief → poll → harvest
 
 butler 收到 dispatch `consumer.kind=tmux_window`, target 机器 116, brief 是 "去把 issue #42 的 PR review 走完"。下面是端到端 SOP（每行调用方现场抄）。
@@ -330,6 +370,22 @@ done
 9. window name 含特殊字符（`/`, `:`, 空格）会让 `tmux ... -t session:window` 解析失败。命名时只用 `[A-Za-z0-9_-]`。
 10. `tmux has-session` 在远程返回 "no server running" 是正常的（第一次 spawn），按 idempotent 处理，不要把它当 error。
 11. `--append-system-prompt` vs `--system-prompt` — append 保留 CC 的工具能力，replace 会把工具描述也覆盖掉导致 CC 不会调用 tool。executor 隔离用 append，不要用 replace。
+12. iTerm2 CC 集成模式（`-CC` 标志）会破坏 dashboard 布局 — 开了 `-CC` 后 iTerm2 会接管 tmux 的 pane 渲染，`select-layout tiled` 失效，capture-pane 输出也会带额外元数据。调度脚本不要在 `-CC` 模式下跑。
+13. capture-pane 误判 CC idle 状态 — background agent 运行时 pane 末尾可能显示 `❯` 提示符，但 CC 实际仍在运行。应优先用 `pane_title` 首字符（braille = busy，✳ = idle）做首轮判断，capture-pane 降级为二次确认。见 pane_title 状态判定 section。
+14. 并行 claude -p 上限约 4 — CC issue #24990 记录了超过 4 个并发 `-p` 进程时出现 token 争用导致 hang 的问题。executor pool 上限保守设 4，超出时让新任务排队等 idle slot，不要无限 spawn。
+15. agent hang 无超时 — CC 不提供内建的任务超时机制（CC bug #28482）。调度方必须在外层实现 kill 机制：记录 `started_at`，poll 时判断 `now - started_at > threshold` 则强制 `tmux kill-pane` 后重起。阈值根据任务类型自定，建议 10–30 分钟。
+
+## 快捷片段
+
+### ctx% 快速读取
+
+从 pane 末行抓 CC 当前 context 使用百分比（用于调度方判断"是否快 ctx 满了"）：
+
+```bash
+tmux capture-pane -t {session}:{window} -p -S -1 | grep -oP 'ctx:\K\d+(?=%)'
+```
+
+输出示例：`73`（表示 73% context 已用）。抓不到（CC 未显示 ctx% 行）时输出空，调度方按"未知"处理。
 
 ## Non-goals
 
