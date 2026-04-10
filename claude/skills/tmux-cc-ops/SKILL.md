@@ -1,17 +1,18 @@
 ---
 name: tmux-cc-ops
-description: Primitives for spawning, prompting, capturing, and state-classifying remote/local Claude Code sessions running inside tmux windows. Use when a scheduler/butler needs to operate CC sessions as worker pool — spawn on (machine, session, window), send a brief, poll pane to decide idle / busy / awaiting_permission / done-unread / dead. Not for interactive single-session use.
+description: Primitives for managing tmux windows with Claude Code sessions — spawn, send prompts, capture output, classify state, build grid layouts. Use when you need to run multiple CC sessions, monitor their status, or operate remote executors.
 ---
 
 # tmux-cc-ops
 
-tmux + Claude Code 操控 SOP。给调度器（butler 等）做远程/本地 CC executor 池用。本身不提供脚本封装，调用方按 SOP 现写 bash/Python。
+tmux + Claude Code 操控 SOP。管理本地和远程的 CC session — 开窗、送 prompt、看状态、布局监控面板。
 
 ## Triggers
 
-- 调度器要 spawn 新 CC executor（local 或远程）
-- 已有 tmux window 需要 poll 状态
-- `consumer.kind=tmux_window` 的 dispatch 需要落地
+- 需要同时跑多个 CC session（本地或远程）
+- 需要 poll 某个 tmux window 里 CC 的状态
+- 需要给远程机器开 CC session 跑任务
+- 需要搭建多 pane 监控面板
 
 ## 任意 N pane grid 布局
 
@@ -52,10 +53,10 @@ done
 
 ## Hard Rules
 
-1. tmux server 必须跑在 executor 机器上，不是 butler 本地。远程 executor = `ssh X → tmux new-window → claude`，禁止 `本地 tmux → ssh X → claude`。原因：后者 SSH 断则 CC 收 SIGHUP 退出，executor 寿命跟 butler session 绑死。
+1. 远程 executor 的 tmux 必须跑在远程机器上：`ssh X → tmux new-window → claude`。禁止 `本地 tmux → ssh X → claude`（SSH 断则 CC 收 SIGHUP 退出）。本地操作无此限制。
 2. 状态判定只能基于 sanitized capture-pane 输出（去 ANSI、去 status-line 噪音、保留最后 N 行），不准基于 exit code 或脑补时序。
 3. 永远不替用户决策权限弹窗。识别到 `awaiting_permission` → 上报，禁止盲发数字键。必须先 capture-pane 确认含 Yes/No + `esc to cancel` 才放行。
-4. 同一 `(machine, session, window)` 不允许并发两个 brief。送 brief 前先 classify 确认是 `idle` 或 `done_unread`。
+4. 同一 window 不允许并发两个 brief。送 brief 前先 classify 确认是 `idle` 或 `done_unread`。
 5. 远程操作走 `ssh X 'tmux ...'`，每条命令独立 ssh exec，不维持长连接。
 6. `dead` 必须有积极证据：last non-empty line 命中 shell prompt 正则 + capture 非空 + `prev_state not in (busy, starting)`。证据不足落 `idle`。
 
@@ -155,4 +156,4 @@ done
 
 ## Non-goals
 
-- 不管 dispatch ledger / receipt 格式；不做路由决策；不管 brief 语义内容；不替用户做权限决策（hard rule #3）；不覆盖 trust-this-directory sandbox prompt。
+- 不做路由决策（哪个任务发给哪台机器）；不管 prompt 怎么写；不替用户做权限决策（hard rule #3）；不覆盖 trust-this-directory sandbox prompt。
