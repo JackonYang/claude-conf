@@ -67,10 +67,33 @@ done
 | pane_title 首字符 | 判定 |
 |---|---|
 | braille (U+2800–U+28FF) | busy |
-| ✳ (U+2733) | idle |
-| 其他 / 空 | 降级到 capture + classify |
+| ✳ (U+2733) | idle — 但须配合 statusline 检查（见下方） |
+| hostname / 普通文本 | starting（trust-this-directory 阶段，CC TUI 尚未就绪） |
+| 空 / 空白 | CC 已退出（dead），配合 capture-pane 确认 shell 提示符 |
+| 其他 | 降级到 capture + classify |
 
-注意：CC 异常退出后 pane_title 可能保留旧值，不能单独依赖，需配合 capture-pane 二次确认。
+注意：CC 完成任务后 pane_title 可能短暂保留 braille 旧值，过几秒后才更新为 ✳。不能单独依赖 pane_title，需配合 capture-pane + statusline 确认。
+
+### ✳ 时必须检查 statusline — background shell/agent 场景
+
+看到 ✳ (idle) 时，还需检查 statusline 最后两行是否含 `shell` 或 `agents` / `local agent` 关键词：
+
+```bash
+# 抓 statusline（最后 2 行含 status bar 内容）
+tmux capture-pane -t {session}:{window} -p -S -2 | tail -2
+```
+
+| statusline 含什么 | 实际状态 |
+|---|---|
+| 无 `shell` / `agents` / `local agent` | 真 idle，可以发指令 |
+| `· N shell` 或 `· N shells` | background shell 在跑，主 CC idle 但有子进程未完成 |
+| `· N local agent` 或 `· N local agents` | background sub-agent 在跑，主 CC idle 但 agent 未完成 |
+
+实测证据（jackon.me butler session，2026-04-09）：
+- `butler:wiki-scout`：pane_title=✳，statusline=`⏵⏵ bypass permissions on · 1 shell`，实际有 shell 后台运行
+- `butler:claude`：pane_title=✳，statusline=`⏵⏵ bypass permissions on · 1 local agent`，实际有 sub-agent 在跑
+
+判定规则：pane_title=✳ 且 statusline 无 shell/agents → `idle`；有 shell/agents → `background_busy`（不能派新任务）。
 
 ## 常用命令速查
 
@@ -105,14 +128,16 @@ tmux kill-window -t ${SESSION}:${WINDOW}
 |---|---|
 | spinner 词（Thinking/Working/Cogitating...）+ `esc to interrupt` | 在跑，等着 |
 | `Do you want to` + 编号选项 + `esc to cancel` | 等权限确认，上报 owner |
-| `❯ ` 提示符，无 spinner | idle，可以发指令 |
+| `❯ ` 提示符，无 spinner，statusline 无 shell/agents | idle，可以发指令 |
+| `❯ ` 提示符，但 statusline 含 `· N shell` 或 `· N local agent` | background busy — 主 CC idle 但有子进程/sub-agent 未完成，不能派新任务 |
 | `Welcome to Claude Code` / `Loading` | 正在启动 |
+| trust-this-directory 选项框（非 CC TUI，pane_title=hostname） | 启动阶段等确认，需发 Enter 或传 `--dangerously-skip-permissions` |
 | `panic:` / `Traceback` / `API Error` | 出错了 |
-| shell `$` / `%` 提示符，无 CC TUI | CC 已退出 |
+| shell `$` / `%` 提示符，无 CC TUI，pane_title 为空 | CC 已退出 |
 
-也可以用 pane_title 快速预判：`tmux display-message -p -t ${SESSION}:${WINDOW} "#{pane_title}"` — 首字符是 braille 旋转动画 = busy，✳ = idle。注意 CC crash 后 pane_title 可能保留旧值，需配合 capture-pane 确认。
+也可以用 pane_title 快速预判：`tmux display-message -p -t ${SESSION}:${WINDOW} "#{pane_title}"` — 首字符是 braille 旋转动画 = busy，✳ = idle（但需配合 statusline 排除 background busy，见上方"✳ 时必须检查 statusline"），空 = dead。注意 CC crash 后 pane_title 可能保留旧值，需配合 capture-pane 确认。
 
-关键原则：不确定时当 idle 处理，不要猜 dead。dead 需要看到 shell 提示符等积极证据。
+关键原则：不确定时当 idle 处理，不要猜 dead。dead 需要看到 shell 提示符 + pane_title 为空等积极证据。
 
 ## 已知坑
 
