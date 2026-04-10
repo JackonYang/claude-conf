@@ -72,6 +72,55 @@ link() {
   fi
 }
 
+link_agents() {
+  local agents_src="$REPO_DIR/claude/agents"
+  local agents_dst="$CLAUDE_DIR/agents"
+
+  if [[ ! -d "$agents_src" ]]; then
+    echo "SKIP  $agents_src (not found)"
+    return
+  fi
+
+  mkdir -p "$agents_dst"
+
+  for src in "$agents_src"/*.md; do
+    [[ -e "$src" ]] || continue
+    local fname
+    fname="$(basename "$src")"
+    local dst="$agents_dst/$fname"
+
+    if [[ -L "$dst" && "$(readlink "$dst")" == "$src" ]]; then
+      echo "OK    $dst -> $src"
+      continue
+    fi
+
+    if [[ -e "$dst" && ! -L "$dst" ]]; then
+      local backup="${dst}.backup.$(date +%Y%m%d%H%M%S)"
+      if $DRY_RUN; then
+        echo "WOULD backup $dst -> $backup"
+      else
+        mv "$dst" "$backup"
+        echo "BACK  $dst -> $backup"
+      fi
+    fi
+
+    if [[ -L "$dst" ]]; then
+      if $DRY_RUN; then
+        echo "WOULD rm old symlink $dst"
+      else
+        rm "$dst"
+      fi
+    fi
+
+    if $DRY_RUN; then
+      echo "WOULD $dst -> $src"
+    else
+      ln -s "$src" "$dst"
+      echo "LINK  $dst -> $src"
+    fi
+  done
+}
+
 run_symlink() {
   echo "claude-conf setup $(date +%Y-%m-%d)"
   $DRY_RUN && echo "(dry run mode)"
@@ -81,6 +130,7 @@ run_symlink() {
   link "claude/statusline-command.sh"  "statusline-command.sh"
   link "claude/hooks"                  "hooks"
   link "claude/skills"                 "skills"
+  link_agents
   echo ""
   echo "done."
 }
