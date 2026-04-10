@@ -13,6 +13,21 @@ tmux + Claude Code 操控 SOP。给调度器（butler 等）做远程/本地 CC 
 - 已有 tmux window 需要 poll 状态
 - `consumer.kind=tmux_window` 的 dispatch 需要落地
 
+## 任意 N pane grid 布局
+
+通用方法：split-window N-1 次 → `select-layout tiled` 自动排列。
+
+```bash
+# 2×3 = 6 pane: 1 原始 + 5 次 split → tiled
+for i in $(seq 1 5); do tmux split-window -t ${SESSION}:${WINDOW}; done
+tmux select-layout -t ${SESSION}:${WINDOW} tiled
+
+# 2×4 = 8 pane: 1 原始 + 7 次 split → tiled
+# 3×3 = 9 pane: 1 原始 + 8 次 split → tiled
+```
+
+远程：每条 tmux 命令前加 `ssh "$MACHINE"`。tiled 根据终端尺寸自动选行列比，宽屏接近 RxC，窄屏可能变形，可接受。
+
 ## Hard Rules
 
 1. tmux server 必须跑在 executor 机器上，不是 butler 本地。远程 executor = `ssh X → tmux new-window → claude`，禁止 `本地 tmux → ssh X → claude`。原因：后者 SSH 断则 CC 收 SIGHUP 退出，executor 寿命跟 butler session 绑死。
@@ -69,17 +84,6 @@ classify 实现要点：
 - catch-all 是 `idle` 不是 `dead`；`dead` 必须严格按积极证据返回
 - 函数必须 pure，无 side effect
 
-## 多 executor 布局：2×3 grid
-
-```bash
-SESSION=jack; WINDOW="executor-pool"; MACHINE=116
-ssh "$MACHINE" "tmux new-window -t ${SESSION}: -n ${WINDOW}"
-for i in $(seq 1 5); do ssh "$MACHINE" "tmux split-window -t ${SESSION}:${WINDOW}"; done
-ssh "$MACHINE" "tmux select-layout -t ${SESSION}:${WINDOW} tiled"
-```
-
-pane 数不是 6 的整数倍时 tiled 做不均匀切分，可接受。
-
 ## Worked example: spawn → brief → poll → harvest
 
 ```bash
@@ -129,4 +133,4 @@ done
 
 ## Non-goals
 
-- 不提供脚本封装；不管 dispatch ledger / receipt 格式；不做路由决策；不管 brief 语义内容；不替用户做权限决策（hard rule #3）；不覆盖 trust-this-directory sandbox prompt。
+- 不管 dispatch ledger / receipt 格式；不做路由决策；不管 brief 语义内容；不替用户做权限决策（hard rule #3）；不覆盖 trust-this-directory sandbox prompt。
