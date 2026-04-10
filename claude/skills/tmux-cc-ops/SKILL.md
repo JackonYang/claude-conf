@@ -28,7 +28,9 @@ tmux + Claude Code 操控的 SOP。给调度器（butler 等）做远程/本地 
 
 ## pane_title 状态判定
 
-CC 通过 OSC 转义序列设置终端标题，tmux 自动捕获为 `pane_title`。用它做首轮 busy/idle 判定比纯 capture-pane regex 更可靠 — background agent 运行时 capture-pane 可能显示 `❯` 误判为 idle，但 pane_title 的首字符不会撒谎。
+CC 通过 OSC 转义序列设置终端标题，tmux 自动捕获为 `pane_title`。用它做首轮 busy/idle 判定比纯 capture-pane regex 更可靠 — background agent 运行时 capture-pane 可能显示 `❯` 误判为 idle，但 pane_title 提供了更可靠的信号。
+
+注意：CC 异常退出后 pane_title 可能保留旧值，braille 首字符不会自动清除。pane_title 不能单独依赖 — 必须配合 capture-pane classify 做二次确认，尤其是在 CC 可能已 crash 的场景下。
 
 ```bash
 tmux display-message -p -t {session}:{window} "#{pane_title}"
@@ -276,6 +278,8 @@ ssh "$MACHINE" "tmux select-layout -t ${SESSION}:${WINDOW} tiled"
 
 注意：pane 数不是 6 的整数倍时，tiled 会做不均匀切分，视觉上最后一列可能只有 1 行。可以接受，调度层不感知 pane 布局。
 
+注意：tiled 的行列分布取决于终端尺寸，在宽屏终端上接近 2x3，窄终端可能变 3x2 或其他。不是硬保证。
+
 ## Worked example: spawn → brief → poll → harvest
 
 butler 收到 dispatch `consumer.kind=tmux_window`, target 机器 116, brief 是 "去把 issue #42 的 PR review 走完"。下面是端到端 SOP（每行调用方现场抄）。
@@ -285,7 +289,7 @@ MACHINE=116
 SESSION=jack
 WINDOW="42-pr-review"
 CWD="/tmp/cc-iso-$(date +%s)-${WINDOW}"
-BRIEF_FILE=/tmp/brief-${WINDOW}.txt
+BRIEF_FILE="/tmp/brief-${WINDOW}.txt"
 
 # 1. spawn — 在 116 上开 tmux window，不是本地
 ssh "$MACHINE" "tmux has-session -t $SESSION 2>/dev/null || tmux new-session -d -s $SESSION"
@@ -315,10 +319,10 @@ done
 cat > "$BRIEF_FILE" <<'EOF'
 issue #42: ...多行 brief 内容...
 EOF
-ssh "$MACHINE" "cat > /tmp/brief.txt" < "$BRIEF_FILE"
-ssh "$MACHINE" "tmux load-buffer -b cc-brief /tmp/brief.txt \
-                && tmux paste-buffer -b cc-brief -t ${SESSION}:${WINDOW} \
-                && tmux delete-buffer -b cc-brief"
+ssh "$MACHINE" "cat > /tmp/brief-${WINDOW}.txt" < "$BRIEF_FILE"
+ssh "$MACHINE" "tmux load-buffer -b cc-brief-${WINDOW} /tmp/brief-${WINDOW}.txt \
+                && tmux paste-buffer -b cc-brief-${WINDOW} -t ${SESSION}:${WINDOW} \
+                && tmux delete-buffer -b cc-brief-${WINDOW}"
 sleep 0.3
 ssh "$MACHINE" "tmux send-keys -t ${SESSION}:${WINDOW} Enter"
 
@@ -367,7 +371,7 @@ done
 6. SSH ControlMaster 跟 tmux 不冲突，但跟"tmux 跑在本地套 ssh"那种错用法叠加会让症状更迷惑（断连后 mux 还假装活着）。一律按 hard rule #1 走。
 7. status-line / vim-airline 之类装饰会让同一信息每秒刷新，sanitize 必须做"连续相同行去重"，否则 last-N-lines 全是 status-line 噪音。
 8. CC 启动如果遇到未授权目录 / sandbox prompt，会卡在一个非 TUI 的"是否信任此目录"提问 — 这种情况判定函数会落 `idle`（catch-all，因为不满足 dead 的积极证据），调度方需要单独有"trust prompt" 探测（grep `Do you trust the files` / `trust this directory` 之类），本 skill 的 classify 不覆盖这条边界。
-9. window name 含特殊字符（`/`, `:`, 空格）会让 `tmux ... -t session:window` 解析失败。命名时只用 `[A-Za-z0-9_-]`。
+9. window name 含特殊字符（`/`, `:`, 空格）会让 `tmux ... -t session:window` 解析失败。命名时只用 `[A-Za-z0-9_-]`。CWD 构建也应只用 `[A-Za-z0-9_-./]`，避免通过 send-keys 注入。
 10. `tmux has-session` 在远程返回 "no server running" 是正常的（第一次 spawn），按 idempotent 处理，不要把它当 error。
 11. `--append-system-prompt` vs `--system-prompt` — append 保留 CC 的工具能力，replace 会把工具描述也覆盖掉导致 CC 不会调用 tool。executor 隔离用 append，不要用 replace。
 12. iTerm2 CC 集成模式（`-CC` 标志）会破坏 dashboard 布局 — 开了 `-CC` 后 iTerm2 会接管 tmux 的 pane 渲染，`select-layout tiled` 失效，capture-pane 输出也会带额外元数据。调度脚本不要在 `-CC` 模式下跑。
