@@ -72,23 +72,34 @@ done
 
 注意：CC 异常退出后 pane_title 可能保留旧值，不能单独依赖，需配合 capture-pane 二次确认。
 
-## Contract：5 个原子操作
+## 常用命令速查
 
-target 三元组：`(machine, session, window)`，machine = `"local"` 或 ssh host。
+```bash
+# 开窗 + 启动 CC
+tmux new-window -t ${SESSION}: -n ${WINDOW}
+tmux send-keys -t ${SESSION}:${WINDOW} "cd ${CWD} && claude --dangerously-skip-permissions" Enter
 
-| op | 输入 | 输出 |
-|---|---|---|
-| spawn_window | target, cwd | target（已起 claude） |
-| send_brief | target, brief_text | — |
-| capture | target, lines=200 | `{exists, capture_ok, text, stderr}`（text 已 sanitize） |
-| classify_state | sanitized text, prev_state | state enum（仅在 `exists && capture_ok` 时调用） |
-| kill_window | target | — |
+# 发指令（简单文本直接 send-keys）
+tmux send-keys -t ${SESSION}:${WINDOW} '你的指令' Enter
 
-调度方自己持久化 `(target → last_state, last_capture_hash, last_state_at)`。
+# 发多行 brief（用命名 buffer 避免换行问题）
+tmux load-buffer -b brief-${WINDOW} /tmp/brief-${WINDOW}.txt
+tmux paste-buffer -b brief-${WINDOW} -t ${SESSION}:${WINDOW}
+tmux delete-buffer -b brief-${WINDOW}
+sleep 0.3 && tmux send-keys -t ${SESSION}:${WINDOW} Enter
 
-## State enum
+# 看状态
+tmux capture-pane -t ${SESSION}:${WINDOW} -p -S -20 | tail -10
 
-`capture()` 负责 "pane 在不在"，返回 `{exists, capture_ok, text, stderr}`。`exists=False` = `missing`，不进 classify。`classify()` 只在 `exists=True && capture_ok=True` 时调用。
+# 关窗
+tmux kill-window -t ${SESSION}:${WINDOW}
+```
+
+远程：命令前加 `ssh $MACHINE "..."`。
+
+## CC 状态判定
+
+从 capture-pane 输出判断 CC 在做什么：
 
 | state | 判据（sanitized tail ~80 行，顺序 match） |
 |---|---|
