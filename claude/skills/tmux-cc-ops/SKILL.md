@@ -18,15 +18,37 @@ tmux + Claude Code 操控 SOP。给调度器（butler 等）做远程/本地 CC 
 通用方法：split-window N-1 次 → `select-layout tiled` 自动排列。
 
 ```bash
-# 2×3 = 6 pane: 1 原始 + 5 次 split → tiled
-for i in $(seq 1 5); do tmux split-window -t ${SESSION}:${WINDOW}; done
+# 通用：N pane = 1 原始 + (N-1) 次 split → tiled
+for i in $(seq 1 $((N-1))); do tmux split-window -t ${SESSION}:${WINDOW}; done
 tmux select-layout -t ${SESSION}:${WINDOW} tiled
-
-# 2×4 = 8 pane: 1 原始 + 7 次 split → tiled
-# 3×3 = 9 pane: 1 原始 + 8 次 split → tiled
 ```
 
 远程：每条 tmux 命令前加 `ssh "$MACHINE"`。tiled 根据终端尺寸自动选行列比，宽屏接近 RxC，窄屏可能变形，可接受。
+
+### 常用场景：2×3 监控 6 个 executor
+
+```bash
+# 在 101 上开 6 pane 监控面板，每个 pane 跑一个 CC executor
+SESSION=jwork; WINDOW=monitor; MACHINE=101
+
+# 开窗 + split 成 6 pane
+ssh $MACHINE "tmux new-window -t ${SESSION}: -n ${WINDOW}"
+for i in $(seq 1 5); do ssh $MACHINE "tmux split-window -t ${SESSION}:${WINDOW}"; done
+ssh $MACHINE "tmux select-layout -t ${SESSION}:${WINDOW} tiled"
+
+# 每个 pane 里启动一个任务（pane 编号 0-5）
+TASKS=("tilert-ci" "debug-54" "debug-49" "pe-audit" "sim-test" "cleanup")
+DIRS=("TileRT4AICA" "aica-lab" "aica-lab" "AICASimPlatform" "AICASimPlatform" "aica-lab")
+for i in $(seq 0 5); do
+  ssh $MACHINE "tmux send-keys -t ${SESSION}:${WINDOW}.${i} \
+    'cd ~/workspace-2026/${DIRS[$i]} && claude --dangerously-skip-permissions' Enter"
+done
+
+# attach 进去看：ssh 101 → tmux attach -t jwork:monitor
+# F11 zoom 单个 pane 操作，再 F11 回 grid
+```
+
+快速触发：`ssh 101 "tmux select-window -t jwork:monitor"` 切到监控面板。鼠标点击切 pane，F11 zoom/unzoom。
 
 ## Hard Rules
 
