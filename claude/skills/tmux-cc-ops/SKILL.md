@@ -89,11 +89,7 @@ tmux capture-pane -t {session}:{window} -p -S -2 | tail -2
 | `· N shell` 或 `· N shells` | background shell 在跑，主 CC idle 但有子进程未完成 |
 | `· N local agent` 或 `· N local agents` | background sub-agent 在跑，主 CC idle 但 agent 未完成 |
 
-实测证据（jackon.me butler session，2026-04-09）：
-- `butler:wiki-scout`：pane_title=✳，statusline=`⏵⏵ bypass permissions on · 1 shell`，实际有 shell 后台运行
-- `butler:claude`：pane_title=✳，statusline=`⏵⏵ bypass permissions on · 1 local agent`，实际有 sub-agent 在跑
-
-判定规则：pane_title=✳ 且 statusline 无 shell/agents → `idle`；有 shell/agents → `background_busy`（不能派新任务）。
+判定：pane_title=✳ 且 statusline 无 shell/agents → `idle`；有 shell/agents → `background_busy`（不能派新任务）。
 
 ## 常用命令速查
 
