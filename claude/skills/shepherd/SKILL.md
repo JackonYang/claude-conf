@@ -146,17 +146,17 @@ d. Wait 15s. Go to Step 1.
 
 ### Step 6. Emit GREEN receipt
 
-Write to `~/.shepherd/receipts/<dispatch_id>.yaml`:
+Write to `~/.shepherd/receipts/<pipeline_id>.yaml` (pipeline_id is GitLab-
+native, globally unique, and already known from Step 1):
 
 ```yaml
 receipt_id: r-<uuid-short>
-dispatch_id: <from dispatch>
+pipeline_id: <id>
 status: green
 updated_at: <timestamp>
 payload:
   mr_iid: <N>
   mr_url: <MR/PR web URL>
-  pipeline_id: <id>
   pipeline_url: <url>
   fix_rounds: <N>
   commits:
@@ -167,17 +167,16 @@ payload:
 
 ### Step 7. Emit BLOCKED receipt
 
-Write to `~/.shepherd/receipts/<dispatch_id>.yaml`:
+Write to `~/.shepherd/receipts/<pipeline_id>.yaml`:
 
 ```yaml
 receipt_id: r-<uuid-short>
-dispatch_id: <from dispatch>
+pipeline_id: <id>
 status: blocked
 updated_at: <timestamp>
 payload:
   mr_iid: <N>
   mr_url: <MR/PR web URL>
-  pipeline_id: <id>
   pipeline_url: <url>
   failed_job: <name>
   failure_type: <build | test | environment | infrastructure | flaky_repeated>
@@ -187,3 +186,38 @@ payload:
   reason: <why>
   suggested_next_action: <what owner should do>
 ```
+
+### Step 8. Notify dispatcher (if auto-spawned)
+
+If `$CI_SHEPHERD_WINDOW` is set in the environment, this executor was
+spawned by ci-shepherd and the dispatcher is waiting for a callback. After
+writing the receipt (Step 6 or 7), send one line back via tmux.
+
+**Do not send blindly** — per skill:tmux-cc-ops hard rule 4, confirm the
+dispatcher window is idle (pane_title = ✳) before sending. If busy, wait
+and retry up to 3 × 5s. If still busy after retries, give up the callback
+— the receipt on disk remains authoritative and the dispatcher can
+reconcile from it on next wake.
+
+```bash
+if [[ -n "${CI_SHEPHERD_WINDOW:-}" ]]; then
+    for attempt in 1 2 3; do
+        title=$(tmux display-message -p -t "$CI_SHEPHERD_WINDOW" "#{pane_title}")
+        if [[ "$title" == ✳* ]]; then
+            tmux send-keys -t "$CI_SHEPHERD_WINDOW" \
+              "executor done: pipeline_id=${PIPELINE_ID} status=${STATUS} receipt=${RECEIPT_PATH}" \
+              Enter
+            break
+        fi
+        sleep 5
+    done
+fi
+```
+
+Where `STATUS` is `green` or `blocked` matching the receipt, and
+`PIPELINE_ID` is the same one this executor shepherded (injected by
+ci-shepherd or resolved via Step 1). This enables ci-shepherd to forward
+the outcome to Discord and reclaim the executor window.
+
+Omit the callback entirely when `CI_SHEPHERD_WINDOW` is unset (i.e. manual
+invocation by owner). The receipt on disk is still the authoritative record.
