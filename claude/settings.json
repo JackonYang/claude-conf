@@ -83,6 +83,6 @@
   "enabledPlugins": {
     "discord@claude-plugins-official": true
   },
-  "effortLevel": "medium",
+  "effortLevel": "xhigh",
   "skipDangerousModePermissionPrompt": true
 }
