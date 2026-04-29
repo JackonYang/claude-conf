@@ -328,6 +328,7 @@ run_verify() {
 }
 
 # ─── dispatch ───────────────────────────────────────────
+# ─── dispatch ───────────────────────────────────────────
 case "$SUBCMD" in
   apply)  run_apply ;;
   verify) run_verify ;;

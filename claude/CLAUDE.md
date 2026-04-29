@@ -15,6 +15,15 @@
 7. 深度思考 — 需要判断力的任务，先抓关键词锚点，带假设验证而非开放发散，产出决策建议而非信息罗列。
 8. 方案文档是方向指引，不是施工图纸 — 设计方案只需要方向正确，执行细节在第一次做的时候才定义。不要为了"完备"而提前设计没遇到过的场景，边走边看。review 时区分"方向问题"（必须修）和"执行细节"（可以边走边看）。
 
+## teamup 产物消费规则
+
+收到 teamup team plan 后：
+
+- 立即按 plan spawn team（manager + ≥5 domain 专家），不重新评估 plan 是否合理 — team 编制是 teamup 的产物，主 session 不二次决策
+- spawn 时把 manager 责任段（key goal 锚定 / reframing / TODO 管理 / 自主推进 / 收尾验收）完整传给 manager role，让它真承担起来
+- 收到 teamup 输出 "无需 teamup — [理由]" 时，不再追问，自己执行
+- teamup 末尾的 `_write_goal "$GOAL"` sh 段必须执行（在 spawn team 前），把 session 目标落到 `~/claude-tasks/<project>/.goal.$CLAUDE_SESSION_ID`。不要在 manager session 里再额外写 .goal
+
 ## 沟通
 
 - 默认中文。写代码、commit message、PR title/description、技术文档时用英文。
